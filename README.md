@@ -1,0 +1,704 @@
+# dsh-plugin-workbuddy-pool
+
+把本机 **WorkBuddy** 的模型（桌面端已登录，或在插件里完成一次浏览器授权），
+做成 **DeepSeek Harness 的一等公民**；并让**同一个 dsh 同时使用多个 WorkBuddy 账号**，
+各自独立桥进程、独立积分，面板里可查看余额、切换账号、自动签到与到期预警。
+
+## 一键即用（三步，零配置）
+
+1. 安装插件（dsh 市场 / `dsh plugin add` / tgz）。
+2. 设置 → WorkBuddy → 「账号」→「开始登录」——授权页会自动在浏览器打开。
+3. 授权完成，回 dsh 模型选择器选一个 WorkBuddy 模型即可对话。
+
+不用填 API Key、Base URL、令牌、端口或环境变量；桥与控制台由插件自动管理。
+**没装桌面端也能用**；已经登录桌面端则自动复用，第 2 步都不用做。
+国内 / 国际版会根据现有账号或桌面端域名自动预选；登录、切号或重启桥后，
+dsh 的模型选择器会自动刷新，不需要再重启一次。
+
+### 聊天页增强（不用打开设置页）
+
+- **模型名带积分倍率**：选择器和聊天顶部显示 `DeepSeek-V4.1-Flash · ×0.11`；
+  免费模型标「免费」，倍率来自桥目录，不是人民币单价。
+- **模型清单与官方对齐**：默认只把 WorkBuddy 官方模型选择器列出的模型放进
+  dsh（与官方 GUI 一致）；网关有、官方未上架的模型在面板里标「官方未上架」，
+  默认不进 dsh 选择器，可先体检再在「显示官方目录外的模型」里勾选。
+  思考档位优先取上游目录的 `reasoning.supportedEfforts`（官方 GUI 的低/高/极致
+  = low/high/max），上游没给时才用本地实测表；上下文按官方默认预算声明，
+  需要 600K / 1M 时在模型详情顶部「上下文窗口（Token）」里调输入/输出：
+  两行都是滑块粗选 + 数值框精确（支持 `128K` / `1M` / `131072`），留空 = 自动。
+  Token 改完自动保存（滑块松开、输入框失焦/回车）；temperature / 思考强度
+  点「保存修改」。官方默认组合（如输入 300K + 输出上限 384K）不会被判错；
+  共享窗口只提示不阻断，模型上限/下限仍硬校验。覆盖后会标「自定义」，可用
+  「已自定义（N）」筛选；偏好写入 `DSH_HOME`，旧插件目录文件启动时自动迁移。
+  **保存后下一轮请求按新预算解析**（同一会话也生效）；用量弹层的分母可能还
+  停留在上一轮，发一条消息即可刷新；切换模型后按该模型自己的预算解析。
+- **顶部积分胶囊**：显示 `积分 N`；悬停看套餐余量 / 今日已用 / 最近一次调用；
+  套餐余量 ≤30% 变黄、≤10% 变红；点击强制刷新。读取失败时保留上次余额并标红；
+  **已有对话但未登录 / 凭据异常时，这里直接变成登录入口**（不用回设置页）。
+- **空会话直接登录**：未登录时 hero 区出现「连接 WorkBuddy」，点击后浏览器授权，
+  成功后选择器自动刷新；等待授权可取消，超时会自动收尾。
+- **每轮积分**：最新一轮回复末尾显示「本轮 x.xxx 积分 / 免费」。
+  宿主通过标准 prop `useChat` 给出本轮 `tokenUsage` / `turnTimings` 时，会拿
+  tokens 与本地请求账本核对，得到**实际扣费**；旧宿主或核对不上时才退回
+  「最近一次已完成的模型请求」估算（可见文案标 `≈`，悬停注明）。只有最后一个回合显示，
+  新回合开始后旧标签会自动消失。
+
+这些分别注册在 `conversation.session.header.utilities`、`conversation.hero.options`、
+`conversation.chat.turnTail`；旧版 dsh 缺少某个槽位时会跳过，不影响设置页。
+
+**分工是「插件当引擎，控制台当界面 —— 且界面就长在 dsh 里」**：
+
+| | 角色 | 负责什么 |
+|---|---|---|
+| **插件**（dsh 内） | 引擎 + 界面 | 原生模型路由、桥与控制台的启停、工具、命令，以及 **设置 → WorkBuddy** 里的 9 个标签页：概览 / 账号 / 用量 / 请求 / 签到 / 诊断 / 模型 / 对话测试 / 日志 —— 控制台的全部功能 |
+| **控制台**（本仓库原有网页） | 同一界面的网页版 | 功能与设置页**完全等价**（见下文的同步设计），想在大屏浏览器里用就开它 |
+
+```
+dsh 的模型选择器  ──►  provider: workbuddy   ──►  插件内置适配器
+                                                    │  (dsh 词汇 ↔ OpenAI 词汇)
+                                                    ▼
+                                        bridge/workbuddy-bridge.mjs（独立进程，127.0.0.1:8790）
+                                                    │  注入鉴权头 / 现取现解凭据
+                                                    ▼
+                                              WorkBuddy 上游
+
+dsh 设置 → WorkBuddy（9 个标签页）═══ 同一份状态 ═══ dashboard/server.mjs（控制台网页）
+```
+
+## 能力一览
+
+装进 dsh 后，这些能力都在同一个插件里（明细见下方「它做了什么」）：
+
+- **零配置接入** —— 不需要 API Key：有桌面端就复用登录态；没有桌面端就点「插件登录」
+- **插件内登录** —— 设置页点「开始登录」→ 浏览器授权；**不安装、不切换桌面端**也能用；
+  凭据加密落盘（Windows DPAPI / 其他平台文件密钥，可关），不读桌面端登录文件
+- **模型直接进选择器** —— 原生 `provider: workbuddy` 路由，不写任何配置文件；
+  模型名直接带 `×0.11` 积分倍率 /「免费」标记
+- **模型管理** —— 启用 / 禁用、体检（可用性 · 消耗倍率 · 实测成本）、详情、CSV 导出
+- **聊天页闭环** —— 未登录时空会话里直接登录；顶部积分胶囊（含今日/最近一次/套餐余量，低余额变色）；每轮回复末尾显示本轮积分
+- **账号切换**、**积分与用量**（趋势图 + 排行 + CSV）、**请求明细**（失败标红 + 错误码一键复制）
+- **环境诊断**（含客户端安装布局体检）、**多轮对话测试**、**每日自动签到**
+- **中英双语** —— 9 个标签页界面全部双语
+
+---
+
+## 两边如何同步、互不冲突（设计核心）
+
+dsh 设置页与控制台网页是**两个前端、一个后端**，所以天然一致：
+
+| 数据 | 谁写 | 为什么 |
+|---|---|---|
+| 模型目录 / 用量 / 最近请求 / 签到状态 / 桥日志 | **桥**（两边都只读桥的接口） | 单一事实来源，读操作无冲突 |
+| 账号切换 / 自动签到开关 / 模型体检结论 | **只由控制台写**（设置页通过 `/workbuddy/console-api/*` 白名单透传） | 控制台的 `lib/state.mjs` 带进程内缓存，插件若另写这个文件，控制台的缓存就过期了 —— 让唯一持有缓存的进程写，两边立刻一致 |
+| 桥 / 控制台进程的启停 | **插件** | 生命周期归引擎管；插件不会去停用户自己双击 `启动.cmd` 起的进程 |
+
+因此：在控制台网页里切账号，设置页 30 秒内（下一次轮询）同步；在设置页体检模型，
+控制台的「可用模型」面板看到的是同一份结论。控制台进程没跑时，读功能照常
+（读桥），写功能给出「启动控制台」的一键提示；宿主端旧构建（未重启 dsh）时，
+明确提示「重启一次 dsh」而不是空白。
+
+透传接口是**白名单**（`consoleApi.mjs`），不是任意路径代理；写操作同样要求
+`x-workbuddy-panel: 1` 头。控制台的代码与文件一个字未改。
+
+---
+
+## 它做了什么
+
+| 能力 | 说明 |
+|---|---|
+| **原生模型路由** | `ctx.llm.registerAdapter(['workbuddy'], …)` —— 模型直接出现在 dsh 模型选择器里，**不写 settings.yaml**，也不依赖 `llm-pi-ai` |
+| **动态模型目录** | 模型列表每次向桥要（带 1 分钟缓存），上游加/减模型不必改配置、不必重启 |
+| **活动倍率** | 解析上游 `schedule`：夜间免费/折扣到点自动切换倍率，过期活动自动隐藏；dsh 选择器、插件面板、控制台同源 |
+| **桥的生命周期** | 启动时复用已在跑的桥，没跑就按配置拉起；桥仍是**独立进程**，控制台、`start-bridge.cmd`、其它 OpenAI 客户端照旧可用 |
+| **控制台的生命周期** | 默认按需：打开数据面板或执行 `workbuddy console` 时才拉起 `dashboard/server.mjs`，闲置 10 分钟自动退出；不自动弹浏览器窗口 |
+| **10 个工具** | `workbuddy_status` / `workbuddy_models` / `workbuddy_usage` / `workbuddy_checkin` / `workbuddy_web_search`（原生搜索兜底）/ `workbuddy_generate_video`（文生视频 / 首尾帧 / 参考图）/ `workbuddy_video_status` / `workbuddy_generate_image`（文生图 / 图生图）/ `workbuddy_image_status` / `workbuddy_bridge`（后者 `action=console` 可确保控制台在跑） |
+| **斜杠命令** | `/workbuddy status\|models\|usage\|checkin\|console\|websearch\|start\|stop\|restart\|cleanup` |
+| **dsh 里的设置页** | 设置 → **WorkBuddy**，9 个标签页 = 控制台的全部功能：概览（含网页搜索状态 / 自动接入 / 一键接入、待办提醒与诊断报告）/ 账号（切换）/ 用量（趋势图 + 积分排行 + CSV）/ 请求（筛选 + CSV）/ 签到（领取 + 自动开关）/ 诊断 / 模型（体检 + 详情）/ 对话测试（多轮流式）/ 日志（过滤 + 清空） |
+| **旧路由迁移** | 首次加载自动清掉 `llm-pi-ai.providers.workbuddy` 手写路由（**先备份**），否则两条同名路由会撞名 |
+
+---
+
+## 安装
+
+插件就在本仓库的 `dsh-plugin/` 里，安装到某个 dsh profile：
+
+```sh
+# 方式零：在 dsh 设置 → 插件 → 添加插件，填 GitHub 地址（推荐给最终用户）
+github:USERNAME/dsh-plugin-workbuddy-pool
+
+# 方式一：用 dsh 自带的插件管理（等价命令行）
+dsh plugin --profile web add github:USERNAME/dsh-plugin-workbuddy-pool
+
+# 方式二：本机开发 —— 设置 → 插件 → 添加插件，填本仓库 dsh-plugin 目录的绝对路径
+```
+
+> 包名是 `dsh-plugin-workbuddy-pool`。旧名 `dsh-plugin-workbuddy` **已被他人占用**
+> （0.0.1，与本项目无关），不要填。发布到 npm 之后可以直接填裸包名。
+
+装完 **重启一次 DeepSeek Harness**。原因：插件模块会被 ESM 缓存，客户端半个
+插件的引导行也只在应用启动时组装一次 —— 热更新看不到新面板。
+
+> 本机（Windows + DSH Desktop）已装好并验证通过，见文末「验证记录」。
+
+### 给别人用 / 分发
+
+插件是**自带一切**的独立包：`npm run vendor` 会把桥、控制台与共享库复制进
+`dsh-plugin/vendor/`（18 个文件、约 1.3 MB），于是对方**不需要仓库**，只要有：
+
+- Windows + Node 18+
+- dsh 桌面版
+- **二选一**：
+  - WorkBuddy 桌面端**已登录**（复用它的登录态，凭据不落盘）；或
+  - **不装桌面端**：在插件里用「插件登录（不依赖桌面端）」完成一次浏览器授权
+    （需要一个 WorkBuddy / CodeBuddy 账号；凭据由插件保管并加密落盘：Windows DPAPI，其他平台文件密钥）
+
+拷 `dsh-plugin/` 文件夹（或 `npm run pack:plugin` 出的 tgz）过去 → 对方跑一次
+`node <插件>/scripts/preflight.mjs` 自检 → 用 dsh 的插件安装指向它 → 重启 dsh。
+
+完整的路线（拷文件夹 / tarball / 发 npm）、验收清单、端口与目录说明、九条常见
+故障排查，见本文件末尾的「故障排查」与「安装」两章；
+
+装不上、配置怎么填、客户端怎么接，优先到
+[Discussions · Q&A](https://github.com/USERNAME/dsh-plugin-workbuddy-pool/discussions/new?category=q-a)
+提问（附脱敏诊断包）；确定是可复现的缺陷再开 issue。公开区都不要贴令牌、登录文件、
+账号 UID 或完整对话。
+
+```sh
+npm run vendor             # 生成/更新插件自带的 vendor/（分发前必做）
+npm run vendor:check       # 校验 vendor/ 与仓库是否同步（CI / 发版前）
+npm run preflight          # 环境自检：Node、脚本、登录文件、端口、模型、安装情况
+npm run pack:plugin        # vendor + npm pack → dsh-plugin-workbuddy-<版本>.tgz
+npm run verify:standalone  # 把插件拷到没有仓库的临时目录，真起一遍桥与控制台
+npm run release:check      # = vendor:check + 单测 + 独立分发演练（发版前一键）
+```
+
+> 仓库在旁边时插件**优先用仓库**（本机改 bridge/dashboard 立刻生效），
+> `vendor/` 只在找不到仓库时兜底 —— 这条顺序有单测守着。
+> `vendor/` 只含运行必需的 18 个文件（约 1.3 MB）；日志、用量账本、`.state.json`、
+> `*.bak`、`.env` 一律不打包（脚本还会主动清理遗留的这类文件）。
+
+### 依赖
+
+- Node.js 18+
+- 桥与控制台脚本：仓库里的 `bridge/workbuddy-bridge.mjs`、`dashboard/server.mjs`，
+  或插件自带的 `vendor/` 副本（插件通过 `projectRoot` 找它们）
+- WorkBuddy 桌面端已安装并登录，**或者**使用插件内登录（见下）
+
+插件**只连本机回环地址**，不新增任何对外监听、不上报任何数据。
+
+---
+
+## 插件登录（不依赖桌面端）
+
+「设置 → WorkBuddy → 账号」里有一张**插件登录**卡片（控制台的「账号」区块也有同一张）。
+流程：点「开始登录」→ 在浏览器里完成 WorkBuddy / CodeBuddy 授权 → 回到面板等待自动完成
+（也可用 `/workbuddy login` 两步式命令）。密码不经过插件，插件只接收令牌。
+
+**凭据来源优先级**（`auto`，默认）：
+
+1. `CODEBUDDY_API_KEY`（显式环境变量覆盖，与旧行为一致）
+2. **桌面端登录文件**（能读、能解密、有 token）
+3. **插件登录凭据**（桌面端本地不可用时的回退；access 过期会自动刷新）
+4. 都没有 → 明确报错并给出两种登录入口
+
+> 上游 401 **不会**触发中途换号：账户可预测性优先。登录成功后，UI 会明确把来源切到
+> 插件并提示（可一键切回）。**不设置** `WORKBUDDY_CREDENTIAL_SOURCE` 时 UI 可自由切换；
+> `auto` 是软默认（不锁定）；只有显式写 `desktop|plugin|api-key` 才会把来源锁定
+> （面板里的切换会被拒绝）。
+
+**存储**：默认 `%USERPROFILE%\.workbuddy-bridge\credentials\`：
+
+| 文件 | 说明 |
+|---|---|
+| `store.key` | 32 字节随机密钥：Windows 由 **DPAPI（当前用户）** 保护；其他平台为 0600 密钥文件（可用 `WORKBUDDY_CREDENTIAL_KEY` 改为环境变量、不落盘） |
+| `<hash>.cred` | AES-256-GCM 信封（AAD 绑定 uid），刷新轮换后原子回写 |
+| `active.json` / `source.json` | 当前账号 / 来源选择，非机密 |
+
+- Windows 换机器 / 换用户 → DPAPI 解不开。file 模式把整个 `credentials/`（含 `store.key`）
+  拷走可以解密；容器/NAS 建议设置 `WORKBUDDY_CREDENTIAL_KEY` 并把目录挂持久卷。
+- 密钥不可用（DPAPI 失败 / 密钥文件损坏 / 环境变量无效）→ **自动退回仅内存**，
+  绝不静默写明文；面板/诊断会显示「仅内存」与回退原因。
+- 同用户的恶意进程仍能读密钥 / 进程内存 —— 这是无 TPM/Hello 方案的共同上限。
+- `WORKBUDDY_CREDENTIAL_STORE=memory` 可主动选择不落盘（桥重启后需要重新登录）。
+- 非 Windows 默认 `file`：桥重启 / 更新插件不需要重新登录；旧版本升级后需要再登录一次
+  才会写出持久凭据。
+- 「退出登录」只删除插件自己保存的那份凭据，**不会注销上游账号**。
+- **同账号识别与互通**：桌面端 JWT 的 `sub` 与插件凭据的 `uid` 是同一套账号标识。
+  两边是同一账号时，账号页**合并成一行**：桌面账号 + 「双凭据」+「用插件凭据」，
+  两条凭据可互换；某一条鉴权失败（401/403）会自动用另一条重试，钱包不变。两边是
+  不同账号时，一次请求只能用一个账号；桌面端没有的插件账号会标「插件」并进同一个
+  账号列表，插件登录卡片只负责登录与来源选择。`WORKBUDDY_CREDENTIAL_FAILOVER=any`
+  可让**不同账号**也自动接管（会切换账号/钱包，默认关闭）。
+- 插件来源的模型请求使用 **WorkBuddy 身份头**（UA / `X-IDE-*` / Origin），与桌面来源的
+  CodeBuddy 扩展头分开；上游若收紧，可设 `WORKBUDDY_PLUGIN_IDENTITY=vscode` 退回旧头。
+
+插件目录里**不包含任何凭据**；分发插件不会把账号带给别人。
+
+---
+
+## 配置
+
+配置写在 profile 的 `cordis.patch.yml` 里，按 id 覆盖插件条目：
+
+```yaml
+- id: workbuddy
+  config:
+    projectRoot: <插件安装目录>        # 可选：桥脚本所在仓库；默认自动探测
+    bridgePort: 8790
+    localToken: wb-local-bridge
+    autoStart: true
+    consoleAutoStart: false            # 控制台默认按需启动（打开数据面板时自动拉起）
+    consoleIdleExitMs: 600000          # 按需拉起的控制台闲置 10 分钟自动退出（0 = 常驻）
+    accountFailoverAfter: 0            # 高级：同模型 10 分钟内 N 次 429 后自动切号（0 = 关）
+    consolePort: 8792                  # 默认跟 .env 的 DASHBOARD_PORT 对齐
+    displayName: WorkBuddy
+    loginRegion: cn                    # 插件登录默认区域：cn / global
+    modelAllow: []                     # 只放行这些模型 id（空 = 全部）
+    modelDeny: []
+    migrateLegacy: true                # 首次加载清理 llm-pi-ai 里的旧 workbuddy 路由
+    tools: true
+    commands: true
+    routes: true
+```
+
+完整默认值见 [`lib/index.js`](lib/index.js) 的 `DEFAULTS`。
+
+> `accountFailoverAfter` 默认 `0`（关闭）。显式开启后，同一账号同一模型在 10 分钟内
+> 被上游 429 达到 N 次时会切到下一个本机可用账号（会切换钱包，控制台按需拉起完成切换）。
+> 只在本机已配置的自有账号间切换，不导出凭据、不做公网中转；可能触发上游风控，
+> 是否开启与后果由使用者自行判断。
+>
+> 纯 Web 控制台用户（不用 dsh 插件）：在项目 `.env` 里设
+> `WORKBUDDY_ACCOUNT_FAILOVER_AFTER=3`，控制台会执行同样的切换（仅桌面来源的账号）。
+> 两种方式不要同时开。
+
+`projectRoot` 的探测顺序：配置 → `WORKBUDDY_ROOT` 环境变量 → 插件目录的上一级
+（插件放在仓库里时）→ `node_modules` 上溯三级 → `~/dsh-plugin-workbuddy-pool`。
+
+**`.env` 也会被尊重**：桥进程只认环境变量，而端口 / 登录文件可能配置在仓库的
+`.env` 里（`config.mjs` 的"统一配置真源"）。插件会读它并补齐默认值，优先级为
+
+```
+插件 config（显式写的） > .env > 进程环境变量 > 内置默认值
+```
+
+认的键：`WORKBUDDY_HOST`、`WORKBUDDY_PORT`、`WORKBUDDY_LOCAL_TOKEN`、
+`WORKBUDDY_AUTH_FILE`、`WORKBUDDY_AUTO_CHECKIN`、`DASHBOARD_PORT`、
+`WORKBUDDY_CONTEXT_WINDOW`；以及模型调用
+相关的非机密变量（版本指纹、`WORKBUDDY_11128_FALLBACK`、
+`WORKBUDDY_SKIP_MODEL_PREFLIGHT`、超时/连接池/重试/限流、`WORKBUDDY_SEARCH_*` 等，
+完整清单见 `lib/index.js` 的 `BRIDGE_ENV_PASSTHROUGH`）。凭据与 API key 不在此列。
+
+### 让 dsh 的网页搜索走 WorkBuddy（不消耗 DeepSeek 钱包）
+
+桥内置了 WorkBuddy 原生搜索：`POST /v1/web_search`，以及 `/v1/messages` 对
+`web_search_20250305` 的兼容分支。dsh 自带的搜索 provider 可以被指向桥。
+
+**默认自动接入（开箱即用，issue #7）**：插件启动、桥就绪后会自动把 dsh 的
+`web-search-deepseek` 接口地址指到本地桥，并把桥本地令牌写进一个**独立的凭据引用**
+`WORKBUDDY_SEARCH_BRIDGE_KEY` —— **不会覆盖**你已有的 `DEEPSEEK_API_KEY`，也不会把
+令牌写进 settings/patch 文件。不需要打开面板、不需要记命令。
+
+自动接入有明确边界：
+
+- **用户显式选过后端就不动**：只要你在 dsh 的网页搜索设置里写过 `baseURL` / API key /
+  `searchProvider`，插件一律不覆盖，只提示可用「一键接入」切换；
+- **桥没好就先等**：桥没启动、没登录时不会写半套配置，等桥就绪后自动补上；
+- **漂移自愈**：已经接好但桥换了端口 / 本地令牌轮换，启动时自动改指向，不用重新点；
+- **可反悔**：点「恢复接入前配置」会还原 dsh 搜索分节与独立凭据引用，并**关闭自动接入**，
+  下次启动不会又接回去。想一开始就关闭自动接入：设置 `WORKBUDDY_AUTO_WEB_SEARCH=0`。
+
+手动入口仍保留：**设置 → WorkBuddy → 概览 → 操作 → 一键接入 WorkBuddy 搜索**，或
+在输入框运行 `/workbuddy websearch`。写完会用 dsh 自己的 web 服务真搜一次：面板/命令会
+明确显示“自检通过”或具体失败原因，不需要再去桥日志里猜。
+
+概览**最上方**有独立的「网页搜索」卡（不藏在「操作」里；旧宿主未上报状态时也会显示
+重启提示与手动入口）；**没接入时还会在「需要你动手」里高亮提醒**，并给出
+「接入搜索」按钮。状态只读配置/凭据/桥存活，不消耗搜索额度；接入后会显示最近一次自检
+的时间与来源数，并提供「重新检测」「恢复接入前配置」。一键接入前会快照 dsh 的搜索分节，
+恢复时只还原该分节与独立凭据引用，不触碰 `DEEPSEEK_API_KEY`。自动接入成功时卡片会注明
+「已自动接入，无需手动配置」；自动失败会显示原因并保留手动按钮。
+
+**dsh 内置搜索坏掉时也有兜底**：插件注册了 `workbuddy_web_search` 工具，直接调用桥的
+`/v1/web_search`，不经过 dsh 的搜索配置。即使 dsh 那边仍指向 DeepSeek、key 401 或配置被
+换掉，agent 也能用这个工具拿到 WorkBuddy 的原生搜索结果。对 agent 说「用
+workbuddy_web_search 搜……」即可；`workbuddy_status` 也会报告内置搜索是否已接桥。
+
+验证提示词（贴进 dsh 对话即可）：
+
+```text
+请使用 web_search 工具搜索「DeepSeek 最新发布」，取 5 条结果，按“标题 + 链接 + 一句摘要”列出；搜索失败就把错误原样告诉我。
+```
+
+手动兜底步骤（**优先用上面的一键**）：
+
+> dsh 的网页搜索卡片会把 API Key 写进当前 `apiKeyEnv` 引用（默认 `DEEPSEEK_API_KEY`），
+> 手动填桥令牌可能覆盖你已有的 DeepSeek key。一键接入使用独立引用，不会动它。
+
+1. 打开 dsh **设置 → 插件 → 内置插件设置 → 网页搜索**；
+2. 使用 **Messages API**（不要选 DeepSeek Search API）；
+3. **接口地址**填 `http://127.0.0.1:8790/v1`；
+4. **API Key** 填桥的本地令牌（`%USERPROFILE%\.workbuddy-bridge\bridge-token`，或控制台「客户端接入」里显示的值）；
+5. 保存后搜一次；桥日志会出现 `web_search (anthropic) results=...`，请求不会发往 DeepSeek。
+   `node tools/dev/probe-web-search.mjs "DeepSeek latest news"` 只验证 `/v1/web_search`；
+   dsh 实际走的 `/v1/messages` 用面板「重新检测」验证。
+
+不建议手工把桥令牌写进 `DEEPSEEK_API_KEY`：那会覆盖你用 DeepSeek 官方搜索的凭据，
+而且本仓库并不存在 `DEEPSEEK_SEARCH_BASE_URL` 这个环境变量。需要脚本化时，直接配置
+dsh 的 `web-search-deepseek` 分节：`baseURL=http://127.0.0.1:8790/v1`、
+`apiKeyEnv=WORKBUDDY_SEARCH_BRIDGE_KEY`，并把桥令牌写入该独立引用；更稳妥的做法仍是
+用面板的一键接入/重新检测。
+
+搜索端点默认按账号区域选择 `https://www.workbuddy.ai` / `https://www.workbuddy.cn`；
+只有自建网关或 A/B 时才需要设置 `WORKBUDDY_SEARCH_BASE`。原生分支是**非流式**的
+（dsh provider 本来就不带 stream；带 `stream:true` 会得到明确 400）。WorkBuddy
+搜索自身有频率限制（上游 code `15001`，桥会映射成 429），这不是 DeepSeek 余额问题。
+
+---
+
+## 和旧流程的关系
+
+在插件之前，模型靠**两处手写 YAML** 注册：`$DSH_HOME/settings.yaml` 与 profile 的
+`cordis.patch.yml`。两条路都指向同一个桥，但用**同一个 provider 名**，因此不能共存。
+
+插件加载时会：
+
+1. 探测这两个文件里是否存在 `llm-pi-ai.providers.workbuddy`；
+2. 存在就按行删掉那一段（**只动这一段**，其它行一个字符不改），并写
+   `<文件>.bak-<时间戳>` 备份；
+3. 在入口页/工具里如实报告删了什么、备份在哪。
+
+关掉这个行为：`migrateLegacy: false`，此时插件只提示、不改文件（但两条路由撞名，
+插件会退到 `fallbackProvider`，默认 `workbuddy-native`，入口页里会显示"兜底"）。
+
+手工清理也可以在入口页点「清理旧路由」，或执行 `/workbuddy cleanup`。
+
+---
+
+## dsh 里的设置页（控制台的全部功能）
+
+**设置 → WorkBuddy**（`settings.section` 槽，注册 id `workbuddy`），9 个标签页。
+右上角有 **`EN` / `中` 语言开关**（选择记进 localStorage，重开保持）：9 个标签页的
+界面文案全部双语，与控制台同一套词条思路；**上游数据**（模型描述、诊断明细、
+对话正文、日志行）保持原样不翻。
+
+| 标签页 | 内容 |
+|---|---|
+| **概览** | 待办提醒（桥停了 / 令牌临期 / 路由未注册 / 有旧路由）、状态卡（账号 / 令牌 / 积分 / 原生路由）、操作条（启停桥与控制台、复制诊断报告与桥地址） |
+| **账号** | 登录目录下的账号与可用性（**同一账号的多份登录快照合并成一行**，不会再看到两个一样的账号；代表行取"生效中 > 可用 > 最近"），一键切换（等价于控制台的切换：自动重启桥、清体检与余额缓存），就地改名（存 `.state.json`，按账号标识记，换号不贴错）、上移/下移或拖动排序、隐藏不想看到的（同上，只写 `.state.json`，不动登录文件）；在 WorkBuddy 客户端里换号后自动跟随桌面当前账号 |
+| **用量** | 1/7/30 天（24 小时粒度）、趋势图（次数 / tokens / 积分，内联 SVG）、指标卡、按模型积分排行、失败列表、导出 CSV、清空账本 |
+| **请求** | 逐条请求（模型筛选 / 仅看失败 / 条数 / 暂停自动刷新）、失败标红、点失败复制详情、导出当前筛选 CSV |
+| **签到** | 今日状态 / 连续天数 / 上次尝试 / 自动签到开关 / 一键领取 |
+| **诊断** | 环境诊断（与控制台同一套 `lib/diagnostics.mjs`；会检查两个 WorkBuddy 客户端是否被装进同一目录），按状态着色、带建议 |
+| **模型** | 动态目录全表（上下文 / 输出 / 倍率 / 多模态、官方默认与可选上下文档位、档位来源）、官方/未上架标记、全部体检 / 重测不可用 / 单个重测（带进度）、清除结论、详情（含输入/输出 Token 表单，改完自动保存）、导出 CSV；「显示官方目录外的模型」开关（默认关，未上架模型不进 dsh 选择器）。dsh 设置弹窗较窄时自动切成卡片布局，详情单列，体检毫秒/错误收进悬停提示 |
+| **对话测试** | 多轮流式对话、按模型选择、停止、本轮耗时 / tokens / 扣分（消耗登录账号的额度，与控制台同一行为） |
+| **日志** | 关键字过滤 / 只看错误 / 只看本次启动 / 暂停刷新 / 行数选择 / 清空 |
+
+<!-- 截图占位：发布前把 docs/plugin-panel-models-detail.png 放进仓库即可显示
+<img src="docs/plugin-panel-models-detail.png" width="100%"
+     alt="模型详情顶部：上下文窗口（Token）输入/输出两行，每行滑块与数值框；下方是采样参数、保存状态与模型元数据">
+-->
+
+页面数据来自插件挂的同源 HTTP 路由：
+
+| 路由 | 用途 |
+|---|---|
+| `GET /workbuddy/status[?quota=1]` | 桥 + 控制台 + 路由 + 模型目录 + 旧路由 + 积分（`quota=1` 强制重读上游） |
+| `GET/POST /workbuddy/quota` | 积分缓存 / **强制重读上游**（积分卡上的「刷新积分」按钮） |
+| `GET /workbuddy/models[?refresh=1]` | 归一化后的模型目录 |
+| `GET/DELETE /workbuddy/usage?days=N[&hours=1]` | 本地账本汇总 / 清空（删必须面板头） |
+| `GET /workbuddy/requests?limit=N` | 最近请求明细 |
+| `GET/DELETE /workbuddy/log?lines=N` | 桥日志尾部 / 清空 |
+| `GET/POST /workbuddy/checkin[?claim=1]` | 签到状态 / 领取 |
+| `GET/POST /workbuddy/console` | 控制台状态 / `{action: start\|stop}` |
+| `POST /workbuddy/bridge` | `{action: start\|stop\|restart\|status}` |
+| `GET/POST /workbuddy/migrate` | 探测 / 清理旧路由（POST 带 `{dryRun:true}` 可预演） |
+| `*  /workbuddy/console-api/<白名单>` | 控制台域功能的受控透传（见「两边如何同步」） |
+
+**写操作必须带 `x-workbuddy-panel: 1` 头**：这会让跨站表单/简单请求直接打不进来
+（带自定义头会触发 CORS 预检，而预检不会被放行），等于用最小代价挡掉 CSRF。
+读接口只返回非敏感元数据，**绝不含任何令牌或对话内容**。
+
+> 版本错配的兜底：控制台域的面板遇到「控制台没跑」给一键启动，遇到「宿主端旧构建
+> （未重启 dsh，透传 404）」给明确的重启提示 —— 不会出现空白表格或对 404 空转。
+
+---
+
+## 工具与命令
+
+| 工具 | 用途 |
+|---|---|
+| `workbuddy_status` | 桥 / 账号 / 令牌 / 积分 / 路由 / 模型数 / 控制台地址，排查「模型没出现」的第一步 |
+| `workbuddy_models` | 列出当前真正可用的模型（可过滤、可强制刷新） |
+| `workbuddy_usage` | 最近 N 天调用次数、tokens、积分、失败数 |
+| `workbuddy_checkin` | 签到状态；`claim=true` 立即领取 |
+| `workbuddy_web_search` | 直接走桥的 WorkBuddy 原生搜索；dsh 内置搜索 401/未接入时的兜底 |
+| `workbuddy_generate_video` | 提交 Miora 视频任务（文生视频 / 首尾帧 / 参考图）。**高积分计费**；上游同步完成时直接返回产物/失败原因并可用 `save_to` 落盘，异步时返回任务 id；同一需求不要重复提交 |
+| `workbuddy_video_status` | 查询视频任务；默认代等 20 秒、`wait_seconds` 最高 120 秒（桥按 60 秒一段轮询），completed 返回有时效的下载 URL，processing 时明确提示不要重提 |
+| `workbuddy_generate_image` | 提交 Miora 图片任务（只给 prompt = 文生图；给 images = 图生图）。**高积分计费**；上游同步完成时直接返回产物/失败原因并可用 `save_to` 落盘，异步时返回任务 id；同一需求不要重复提交 |
+| `workbuddy_image_status` | 查询图片任务；默认代等 20 秒、`wait_seconds` 最高 120 秒，completed 返回有时效的下载 URL 与可复用 fileKey |
+| `workbuddy_bridge` | `status` / `start` / `stop` / `restart` 桥；`console` 确保控制台在跑并返回地址 |
+
+```
+/workbuddy status      桥与路由总览
+/workbuddy models      可用模型
+/workbuddy usage       最近 7 天用量
+/workbuddy checkin     签到状态
+/workbuddy start|stop|restart
+/workbuddy cleanup     清理旧的 llm-pi-ai 路由
+```
+
+---
+
+## 实现要点（给要改代码的人）
+
+- **宿主端不 import 任何 `@deepseek-ai/*` 包**。`llm.registerAdapter()` 只调用
+  `adapter.providerInfo()` 与 `adapter.providerRetryPolicy()`，**没有 instanceof
+  检查**，所以适配器是普通对象即可；profile 的 `node_modules` 里本来也解析不到
+  那些包。可选服务（`tools` / `commands` / `webServer`）统一走 `ctx.inject` 等就绪。
+- **适配器必须走 `ctx.llm` 属性**而不是 `ctx.get('llm')`：cordis 的服务代理会把
+  `this.ctx` 绑到**调用方**的 fiber，注册才不会挂到别人的生命周期上。
+- **派发失败必须以 `finish` 块收尾**（`kind: 'error'`），不能向调用方抛；
+  dsh 的流协议是 block-start → *-delta → block-end，末尾 usage → finish。
+- **客户端半边是 lazy-CJS 包**（`window.__ModuleLoader__.load({id, factory})`），
+  由 dsh 的引导图加载，`react` 来自平台模块表。`dsh.client.inject` 是**引导图上的
+  行依赖**（写包名），不是 cordis 服务名 —— 写错会让整行不激活；本插件因此不声明它，
+  改在运行时用 `ctx.inject(['slots'], …)` 等槽服务。
+- **客户端模块的 `id` 必须等于 Loader 条目的包名**。同一份 `lib/client.js`
+  要同时服务单文件夹分发（`dsh-plugin-workbuddy-pool`）与 github 直装
+  （仓库根，同名），以及兼容旧装法的 `dsh-plugin-workbuddy` /
+  `workbuddy-to-dsh`，所以它会按已知包名 + `<script src>` 里的实际 id
+  各注册一次；只写死一个，另一种安装方式会在 web boot 时报 `import failed`
+  （issue #3）。两份 bundle 同时存在时，重复注册会被忽略。包名清单的单一来源是
+  `lib/packageNames.mjs`；改动安装形态后跑 `npm run test:plugin`（install-contract）
+  与 `npm run verify:github`（真实根包打包安装演练）。
+- **桥与控制台都是独立进程**：插件停用/卸载只会摘掉路由、工具与入口页，
+  **不会杀掉桥**，也不会去停别人（双击 `启动.cmd`）起的控制台 ——
+  只停自己拉起来的那个。
+- **不会和插件抢着拉桥**：插件拉起的控制台实例带 `DASHBOARD_AUTO_START_BRIDGE=0`
+  （桥归插件管），避免两个进程同时探测→同时 spawn 打出 `EADDRINUSE`。
+  想让控制台照旧自己拉桥，就在环境里显式设成 `1`。
+- **控制台靠首页的结构标记识别**（`id="navTabs"`），不是"端口能连上就算数"：
+  端口被别的服务占着时会报 `foreign` 并拒绝动手，不会误连一个陌生 HTTP 服务。
+  探测结果有 20 秒缓存（面板每 10 秒问一次状态，没必要每次都拉首页）。
+
+### 目录
+
+```
+lib/index.js       插件入口：配置、路由注册、工具/命令/设置页装配、旧路由迁移
+lib/adapter.mjs    dsh 词汇 ↔ OpenAI 词汇；SSE → StreamChunk
+lib/bridge.mjs     桥进程管理 + HTTP 客户端
+lib/console.mjs    控制台进程管理（识别 / 复用 / 拉起）
+lib/consoleApi.mjs 控制台 API 的白名单透传（同步设计的关键）
+lib/models.mjs     模型目录归一化
+lib/tools.mjs      10 个模型可见工具（含视频/图片生成与状态）
+lib/routes.mjs     HTTP 数据面（同源）
+lib/legacy.mjs     旧路由探测与文本级清理（带备份）
+lib/client.js      客户端半边：dsh 设置里的 9 标签页
+tests/             协议/装配/旧路由/控制台/透传测试 + 设置页渲染验证
+```
+
+### 自测
+
+```sh
+# 协议与装配（打桩上游，不碰真实额度）
+node --test dsh-plugin/tests/          # 或：npm run test:plugin
+
+# 入口页渲染验证（无头浏览器 + **真实数据**，产出 docs/plugin-panel.png）
+node dsh-plugin/tests/panel-render.mjs # 或：npm run panel:shot
+node dsh-plugin/tests/panel-render.mjs --offline   # 只用内置样例数据
+
+# 面板 i18n 验收：切到英文后 9 个标签页可见中文必须为 0
+node dsh-plugin/tests/panel-i18n.mjs   # 或：npm run panel:i18n
+npm run panel:check                    # 上面两个一起跑
+```
+
+`panel-render.mjs` 需要无头 Chrome/Edge（由开发机上的 `tools/dev/ui-harness.mjs`
+去找，该目录不进发布包），首次运行会把 React UMD 下到 `.tmp-research/vendor/` 供离线渲染使用。
+
+两个脚本的桩数据与渲染骨架在 `tests/_panel-fixtures.mjs`，**共用一份** ——
+各写一份必然漂移，而桩一漂移，两边验的就不是同一个东西了。
+`panel-i18n.mjs` 还会把桩数据里的中文换成 ASCII：这样扫到的任何中文都只可能来自
+界面文案，而不是上游返回的数据。它同时要求每个标签页的内容够厚
+（≥12 个文本节点），防止「没渲染 → 0 残留」的假绿。
+
+---
+
+## 验证记录
+
+在 **Windows + DSH Desktop 0.2.0-rc.2 / profile `desktop`** 上：
+
+| 项 | 结果 |
+|---|---|
+| 纯逻辑测试 | `node --test dsh-plugin/tests/` **30 项全绿**（流协议、工具调用、错误/取消、wire 转换与净化、日志尾部读取、**方法/权限矩阵**、旧路由手术、装配、路由鉴权、.env 优先级、控制台识别与复用、console-api 白名单透传） |
+| 安装 | `plugin_manager install_bundle` 成功，profile 依赖为 `link:<插件目录>`（源码改动直接可见） |
+| 桥复用 | 复用已在运行的桥（pid 31840，已运行 12h+），未重复拉起 |
+| 控制台复用 | 控制台已在 8792 运行（首页结构标记匹配）→ 插件判定 `running` 并复用，不再拉起第二个 |
+| 原生路由 | `route.registered=true provider=workbuddy`，目录 30 个模型 |
+| **真实模型调用** | 以 `provider: workbuddy` + `model: deepseek-v4.1-flash` 跑通一次真实 agent 轮次，返回「桥已接通。」；桥日志同时出现该请求 |
+| 工具 | 10 个工具注册进当前会话并返回真实数据（状态/模型/用量/签到/搜索/视频生成/视频状态/图片生成/图片状态/桥） |
+| 设置页渲染（场景 1：全部可用） | 无头浏览器加载真实客户端半边：注册契约（`name`/`slots.inject`/模块级 `inject`）逐项断言；**9 个标签页逐个点开**且都有预期内容；趋势图 SVG、模型表行数、「启动控制台」确实发出 POST；无页面错误（截图 `docs/plugin-panel*.png`） |
+| **溢出防护** | 每个标签页都跑横向溢出检查（`scrollWidth > clientWidth` 即失败）；夹具故意塞进真实机器出现的长路径 / 多账号 / 长域名。靠 `box-sizing:border-box` + 内容驱动列宽 + 分层 `overflow-wrap` 策略钉死 |
+| **表格布局（窄列场景 3）** | 在 **620px**（比设置页常见宽度还窄）跑一遍：逐表检查**单元格盒子互不重叠**、内容不宽于格子、单元格不被压到 34px 以下、视口无横向溢出；账号页另外要求卡片内无任何元素溢出/被裁。这套断言正是"7 列挤成一团 + 胶囊压住邻居"那张截图的机器可判定形式 |
+| **启动窗口 404 自愈** | 请求页的桩**故意首帧回 404**（模拟刷新页面时宿主还没挂上路由），断言面板必须自己重试恢复并渲染出行 —— 不许把 `HTTP 404` 挂在那儿等下一个轮询周期 |
+| **下拉可读 + 模型可选** | 原生 `<select>`/`<option>` 显式给底色与字色（暗色主题下曾是"浅字落白底"几乎看不见）；断言对话测试的模型下拉 ≥5 个选项、改值生效、且**切标签页回来仍保持** |
+| **对话端到端** | 桩提供 text/event-stream 的对话流：断言流式回答渲染、**逐轮元数据**（耗时/tokens/扣分贴在每条回答下方）、且确实发出 POST `/workbuddy/console-api/chat` |
+| **破坏性操作二次确认** | 清空账本 / 清空日志 / 清除体检结论都必须先确认：断言"点取消不发请求、点确定才发 DELETE" |
+| **待办提醒** | 概览页要出现「今日还没签到」「最近请求里有 N 条失败」，并且按钮能跳到对应标签页（跨页跳转由容器提供） |
+| **积分卡** | 概览第一张卡就是积分：断言数字字号 ≥26px（实际 38px）、套餐数与进度条数量一致、**同名套餐已合并**（上游会把同一档权益拆成多条）、点「刷新积分」确实发出 `POST /workbuddy/quota` 且给出结果提示；企业/教育号不限量断言显示 `∞` 且不提示"没有套餐明细" |
+| **积分归属可见化** | 断言 quotaAccount ≠ bridgeAccount 时积分卡必须显示「⚠ 积分还是上一个账号的（正在自动重读）」警告 —— 换号后缓存未换新的可见化，用户一眼核对"这积分是谁的" |
+| **模型详情紧跟该行** | 点「详情」后断言详情块是一个 `<tr class="wb-detail-row">`，且它的**上一行就是被点的那个模型**（不是挂到整张表下面）；内容含模型 ID / 上下文窗口（Token）/ 采样参数 / 多模态 / 计费倍率；点「用这个模型对话 →」要切到对话测试并选中该模型 |
+| **促销徽章 / 多模态标记** | 断言模型列表渲染出带色徽章（`限时免费` 等）与**文字版**多模态标记「图片」，页面上**不出现 `badge:…:#颜色` 原始规格、也不出现 emoji 字符**（🖼 这类没人看得懂、字体会渲染成怪块）；同时要有"共 N 个模型，其中 M 个支持图片输入"的统计行 |
+| **表格不紧凑** | 断言模型表在标准宽度下**不需要横向滚动**、操作列按钮**不竖着堆**、行高 ≤80px（被挤扁时按钮会堆起来、行高会暴涨）；列数也做了收敛：上下文与输出合并成一列（拆分信息在详情里） |
+| **诊断误报改判** | 诊断库「dsh 模型路由」用迁移前口径（只认 settings.yaml），对插件的原生路由永远误报 fail —— 设置页按运行时事实改判为 ok（注明"插件运行时注册，无需 settings.yaml"），过时的「勾选后保存」建议一并隐藏 |
+| 设置页渲染（场景 2：宿主旧构建 404） | 控制台域面板都给出「重启一次 dsh」提示；签到页「立即领取」照常；模型页主表照常而「全部体检」禁用（可用性未知即禁用，避免对不存在的接口空点）—— 桥域功能不受影响 |
+| 停用清理 | 禁用 bundle 后路由 404、工具消失，**桥仍在运行** |
+
+**已知限制**
+
+- 客户端半边与宿主端的改动都需要**重启一次 dsh** 才生效（模块被 ESM 缓存、
+  客户端引导行只在应用启动时组装）；未重启时设置页自己会提示。首次启动会把
+  旧插件目录的 `.model-prefs.json` 迁移到 `<DSH_HOME>/workbuddy-model-prefs.json`。
+- **下一轮请求生效**：在模型详情里把输入/输出改掉后，下一次请求按新预算解析
+  （同一会话也生效）；用量弹层的分母可能还停留在上一轮，发一条消息即可刷新。
+  切换模型后，下一轮请求使用该模型自己的预算。
+- 设置页与控制台网页是同一后端的两个前端：轮询有间隔（状态 8 秒、请求 5 秒、
+  账号 30 秒、签到 5 分钟），所以"另一边刚改完"最多延迟一个轮询周期才显示 ——
+  数据本身是同一份，不存在两份各说各话。
+- 签到状态会打到上游计费端点：宿主快照里那份**后台刷新、30 分钟 TTL、绝不阻塞
+  状态查询**；设置页概览自己也会问一次（5 分钟一次）。
+- 控制台诊断库的「dsh 模型路由」一项仍是迁移前口径，**只在设置页被改判**为运行时
+  事实（控制台网页本身照旧显示，因为它没被改过一行）。
+
+---
+
+## 修复记录（都补了回归测试）
+
+### 1.15.0（本轮）
+
+| 症状 | 根因 | 修法 / 回归 |
+|---|---|---|
+| 浏览器登录账号看不到「夜间免费」等活动名，桌面登录同账号可见 | 插件来源的 `/v3/config` 用插件/CLI 身份，能拿到更全模型但不返回 `modelPromotions`；促销只认桌面身份 | 插件来源额外用桌面身份抓一份 `/v3/config`，**只合并 `modelPromotions`**，模型清单仍用插件身份（不丢 v2 独有模型）；诊断看 `upstreamShape.sources['/v3/config#desktopPromotions']`。回归：`bridge.test.mjs` 的插件登录用例 |
+| Cherry Studio 每个字符一条「深度思考」 | 上游每帧带空 `tool_calls: []`，Cherry 的解析器把 `tool_calls != null` 当成 reasoning 段结束 | chat SSE 归一先剔掉空 `tool_calls` / 空 content / null 占位，再聚合逐字符 reasoning；`WORKBUDDY_SSE_NORMALIZE=0` 可回退。回归：`bridge.test.mjs` 的 SSE 夹具 |
+| 升级/重装后账号钉住、用量与本地令牌丢失，旧客户端 401 | state / usage / token 在安装目录内，pnpm 换 tgz 会整个换掉 | 默认迁到 `%USERPROFILE%\.workbuddy-bridge\`（`WORKBUDDY_DATA_DIR` 可覆盖），旧路径首次启动复制迁移；插件与桥读同一份。回归：`state.test.mjs`、插件登录用例、`verify:standalone` |
+
+### 1.14.0
+
+| 症状 | 根因 | 修法 / 回归 |
+|---|---|---|
+| 用量页只看得到模型调用，视频/图片生成既没有次数也没有积分 | 媒体提交不产生模型 tokens/credit，插件用量页只聚合模型与搜索 | 用量页新增「视频提交 / 视频失败 / 图片提交 / 图片失败」与**单独**的「视频消耗积分 / 图片消耗积分」卡片；积分是提交前后余额差（`creditEstimate`，估算）。回归：`panel-render.mjs` / `panel-i18n.mjs` |
+| dsh 里没有图片生成能力 | 桥只接入了 `/v1/videos` | 新增 `POST /v1/images`、`POST /v1/images/edits`、`GET /v1/images/{id}`、`/content`，与视频共用临时 key / 长轮询 / 错误契约；新增 `workbuddy_generate_image` / `workbuddy_image_status`。回归：`miora-image.test.mjs`、`bridge-image.test.mjs`、`image-tool.test.mjs` |
+
+### 1.13.1
+
+| 症状 | 根因 | 修法 / 回归 |
+|---|---|---|
+| `?wait=30` 在上游查询很慢时实际等了远超 30 秒 | 预算只按轮询次数限制，慢查询把每次 2 秒的间隔“顶”成了 N 秒 | 同时用真实截止时间兜底，慢查询也按时收手返回最后一次状态。回归：`miora-video.test.mjs` 的 `task-deadline` 用例 |
+
+### 1.13.0
+
+| 症状 | 根因 | 修法 / 回归 |
+|---|---|---|
+| 从 npm 安装后桥起不来（`ERR_MODULE_NOT_FOUND: miora-video.mjs`） | 根包 `files` 白名单漏了视频模块；插件又优先选仓库根目录的 `bridge/`，于是选中了一个缺文件的入口 | 补进 `files`；新增 `npm run check:pack` 递归校验入口 import 并接进 `release:check`；`verify:release` 也核对 vendored 视频模块。回归：`check-package-files.mjs` |
+| 图生视频参数拼错时，图片没带上却按文生视频提交计费 | 未知字段 / 空帧 / 非字符串参考图被静默跳过 | 一律本地 400，附 `Accepted` 清单与常见错写指路；`firstFrame` 等别名显式接受。回归：`miora-video.test.mjs`、`bridge-video.test.mjs` |
+| 任务已完成但上游没给产物时 `/content` 报 409，客户端以为继续等就行 | 一个 409 同时覆盖“没生成完”和“没产物” | completed 无 https 产物 → 502 `VIDEO_NO_OUTPUT`；查询新增 `?wait=N` 长轮询，`workbuddy_video_status` 的 `wait_seconds` 默认代等 20 秒。回归：`bridge-video.test.mjs`、`video-tool.test.mjs` |
+
+### 1.12.0
+
+| 症状 | 根因 | 修法 / 回归 |
+|---|---|---|
+| 夜间免费模型白天也显示免费；夜间折扣到点仍显示原价；过期活动还挂着「限免」 | 旧代码只看 `discount.factor`，不解析上游 `schedule`；`free` 是静态标记 | 新增 `bridge/promotions.mjs`：按 daily/timezone/validFrom/validUntil 计算生效倍率；hy4 夜间 0、08:00 回 0.29，glm 夜间 0.395；过期活动隐藏。回归：`promotions.test.mjs`、`bridge-promotions.test.mjs`、`models-promotion.test.mjs` |
+| 上游 `tags` 里的旧 `badge:` 会把过期活动带回来 | 直接透传 tags | 输出模型时重建促销 tags，只保留当前有效的徽章。回归：`bridge-promotions.test.mjs` |
+| dsh 选择器/面板/控制台/工具看不到“活动是否进行中” | 只有 `free`/`badge` 两个静态字段 | 新增 `promotion_active/text/until/factor`；模型名按有效倍率显示，界面标「进行中/未生效」，详情显示活动说明与截止时间。回归：`models-promotion.test.mjs`、`panel-render.mjs` |
+
+### 1.11.0
+
+| 症状 | 根因 | 修法 / 回归 |
+|---|---|---|
+| 插件装了，但搜索仍走 DeepSeek/401；「一键接入」藏在「操作」按钮堆里没人发现 | 一键接入需要用户自己找到；真实 dsh 的 settings 服务没有 `get(ns)`，旧代码把已配置的搜索误判成“不可用”，自动接入也被跳过 | 启动后自动接入；概览最上方独立「网页搜索」卡；`workbuddy_web_search` 兜底工具；统一用 `describe()` 读配置。回归：`web-search-auto.test.mjs`、`web-search-auto-apply.test.mjs`、`panel-render.mjs` |
+| 自动接入后重启 dsh，「恢复接入前配置」消失 | 原配置快照只存在内存里 | 无快照时只摘掉插件写入的桥地址/凭据引用并退出自动接入，保留用户其它字段。回归：`web-search-config.test.mjs`、auto-apply 恢复用例 |
+| 首次启动时 settings 服务尚未挂载，自动接入永久 waiting | 只尝试一次就放弃 | 等待并随身份轮询重试；读配置失败按未知处理，绝不“当作没配过”去覆盖。回归：`decideWebSearchAutoSetup` 用例 |
+
+<!-- 截图占位：发布前把 docs/issue-7-search-fixed.png 放进仓库即可显示
+![在 dsh 中经 WorkBuddy 原生搜索成功](docs/issue-7-search-fixed.png)
+-->
+
+### 1.10.0 / 1.10.1
+
+> 1.10.1 仅修正“上下文预算何时生效”的文案与文档，不改变 adapter 行为：
+> 保存后**下一轮请求**按新预算解析；用量弹层的分母可能还是上一轮快照，
+> 发一条消息刷新；切换模型用该模型自己的预算。
+
+| 症状 | 根因 | 修法 / 回归 |
+|---|---|---|
+| 打开模型详情就红字“输出（自动 384K）必须小于输入上下文 300K”，保存按钮禁用 | 把“输入/输出共享窗口”做成了硬校验，而模型官方默认本身就是“输入 300K + 输出上限 384K” | 默认态不报错；只有手动改动后才给黄色提示且不阻断保存；服务端也移除硬拒绝。回归：`panel-render.mjs` 初始态干净 + 共享窗口提示不阻断 |
+| 改完上下文/输出，切页重进又回默认 | 统一保存按钮在窄面板里落到折叠线以下，用户没点保存就切页；草稿随组件卸载丢失 | Token 两行自动保存（滑块松开、输入框失焦/回车）；采样参数仍点「保存修改」，面板上写明。回归：`panel-render.mjs` 失焦/松开各断言 1 次 POST |
+| 面板设 600K，当前聊天仍显示 1M | dsh 的 `request/context` 是**每轮 `prepareCall()` 解析**、仅变化时追加；用量弹层的分母是上一轮请求的快照，保存后没发新消息就不会刷新 | 面板状态改「当前配置」、保存提示「下一轮请求生效，发一条消息刷新」；回归：`panel-render.mjs` 文案断言 |
+| `131072` 显示成 `128K`，再保存变成 `128000` | 输入框用友好 K/M 格式回填，丢精度 | 输入框只显示**可精确回读**的写法（整千/整百万才用 K/M）；滑块刻度仍友好。回归：`panel-render.mjs` 连续两次保存 `131072` |
+| 重装/清 pnpm 缓存后 1M 偏好静默回 300K | `.model-prefs.json` 写在插件安装目录（node_modules 内），会被包管理器抹掉 | 默认写 `<DSH_HOME>/workbuddy-model-prefs.json`；旧文件读取时自动迁移。回归：`model-prefs.test.mjs` 迁移用例（1M 保留） |
+| 表格输出列显示官方上限，覆盖成 32K 仍显示 128K | 列取的是目录上限，不是每模型生效的默认输出 | 表格显示生效值 + 「自定义」标记 + 「已自定义（N）」筛选。回归：`panel-render.mjs` 行值/筛选 |
+
+### 1.9.x 面板回归（历史）
+
+| 症状 | 根因 | 修法 |
+|---|---|---|
+| 刷新页面后满屏 `HTTP 404`，要等一两分钟才恢复 | dsh 的 Web 兜底处理器在插件路由挂上之前一律回 404，而面板把这一帧当终态，下一个轮询要 5~120 秒 | `getJson` 对 404 快速重试 3 次；`useJson` 对任何失败再排一次 4 秒重试；文案改为"插件还没就绪，正在自动重试" |
+| 概览页「重新诊断」点了没反应 | 它调用了一个**根本不存在分支**的 action（`refresh`） | 拆成「刷新状态」+「去诊断 →」，「需要处理」的每条待办也有对应按钮 |
+| `status.checkin` 永远是 `null`（工具里看不到签到） | `state.checkinCache` 从来没有人写（实现遗漏的死字段） | 宿主后台刷新（TTL 30 分钟、在途去重、不阻塞 status），快照同时给出 `checkinError` |
+| 桥日志轮询会把整个文件读进内存 | `readLog` 先 `readFileSync` 全量再切片，而日志是无限增长的、面板每 5 秒问一次 | 改用 fd 只读尾部 `size - maxBytes`，丢掉被截断的半行 |
+| 请求页的模型筛选越用越少 | 下拉只列**当前这一页**出现过的模型 | 改成来自完整模型目录，再并入历史里出现过的旧模型（并显示数量） |
+| 失败请求显示「失败 HTTP 0」 | 用 `r.status \|\| 0` 兜底 | 有状态码才显示，并带上 `code`，hover 显示错误原文、点击复制完整详情 |
+| 清空账本 / 清空日志点了没反应、也不报错 | 破坏性操作既不确认也不检查响应 | 都要二次确认；成功后提示，失败显示 `错误/HTTP 码` |
+| 对话测试只有"最后一轮"的 tokens/扣分 | 元数据存在面板级 `meta`，逐轮丢失 | 元数据贴到**每条回答**下方；本地 `meta` 只作"最近一轮"小结 |
+| 上一轮失败留下的空助手消息会被回灌给上游 | 历史原样下发，`content:null` 且无 tool_calls 的助手轮 + 孤儿 tool 结果都可能被上游 400 | adapter 增加 `sanitizeWire()`：剔空助手轮、剔孤儿 tool 结果、成对的工具调用保留（含测试） |
+| 只读路由对 `PUT` 也照常返回数据 | 读路由没有方法守门（无副作用，但不严谨） | 只读路由非 GET/HEAD 一律 405；`/workbuddy/checkin` 只允许 GET 与带面板头的 POST `?claim=1` |
+| **账号页 7 列挤成一团**：文字逐字折断（`workbudd/y-/desktop.inf/o`）、`使用中` 胶囊压住「令牌剩余」 | 上一轮为"防溢出"把表格设成 `table-layout:fixed` + `overflow-wrap:anywhere`：列被均分到 ~95px，逐字折行；胶囊 `nowrap` 则溢出单元格盖住邻居 | 数据表改回**内容驱动列宽**（`table-layout:auto`）+ 只在词/连字符处换行 + 数字列 nowrap + 胶囊 nowrap（auto 布局下列宽不会小于胶囊）；**账号页改成"每账号一行"的列表**（设置页是窄列，5~7 列表格在那里必然被挤压；账号通常 2~3 个，列表宽窄都好看） |
+| 窄列下胶囊被拆成"使/用/中"三行、域名被折成 `copilot.tencent.co`/`m` | 允许任意断行会让该列的 min-content 只剩一个汉字宽；域名在硬撑的窄列里只能逐字断 | 胶囊恢复 nowrap；账号列表让长域名整行展示（有整行宽度，不再和 5 个列抢地方） |
+| **模型详情跑到列表最下面**，点完不知道是哪个模型的 | 详情块渲染在 `<tbody>` **之外**（挂在整张表下面） | 改成展开行：`tbody` 里紧跟该行插入 `<tr class="wb-detail-row">`，被点的行高亮、按钮变「收起」，详情里再给「用这个模型对话 →」（直接切到对话测试并选中它） |
+| 模型详情里「厂商 j」看不懂；标签里混着 `badge:限时免费:#FF0000` | `vendor` 是上游的单字母代码（不是厂商名）；上游把促销徽章塞在 `tags` 里且**颜色信息被当字符串丢掉** | 目录层把 `badge:标签:颜色` 拆成结构化的 `badges: [{label, color}]`、`tags` 只留干净标签；界面把徽章渲染成**带色小标记**，「厂商」改标为「厂商标识」并加说明 tooltip。客户端同时兼容旧宿主（自己从 tags 解析），所以不重启也能看到徽章 |
+| 模型名后面每行都有个看不懂的 🖼（字体还渲染成怪块） | 我用 emoji 标了"支持图片输入"，但没人看得懂、字形不稳，而且塞在名字后当噪音 | 换成文字标记「图片」（带 tooltip），并在表头上方给统计行「共 30 个模型，其中 20 个支持图片输入」；加断言禁止 emoji 再出现在列表里 |
+| 模型表被挤得很紧凑：出现横向滚动条、`测`/`详情` 按钮竖着堆、行高暴涨 | 列太多（上下文与输出各占一列、体检列还塞了实测扣分），表宽超出卡片；被压窄的操作列里按钮换行了 | 收敛成 6 列（上下文/输出合并、体检列去掉扣分）、操作列 `white-space:nowrap;width:1%` + 右对齐；加断言：标准宽度下不许横向滚动、按钮不许堆、行高 ≤80px |
+
+**新增（对齐控制台的能力）**：概览待办提醒（未签到 / 最近失败 / 令牌临期 / 路由未注册 / 旧路由）+ 就地处理按钮；
+账号页新增凭据列（AtRest 信封 / 明文）与**不可用原因内联**；模型页新增「全部 / 只看不可用 / 只看未测」筛选；
+日志页新增行数统计与「复制当前视图」；对话测试新增模型筛选输入与逐轮元数据。
+
+---
+
+## 通过 npm 分发（维护者备忘）
+
+本仓库的包名是 `dsh-plugin-workbuddy-pool`（`private: true`，用于文件夹 / tgz 分发）。
+
+> 历史包袱：上游项目曾用 `dsh-plugin-workbuddy` 作为包名，该名字**已被他人占用**
+> （0.0.1，非本项目），所以本项目加了 `-pool` 后缀。`lib/packageNames.mjs` 里仍保留
+> 旧名以兼容老装法。
+
+发布到 npm 时把 `private` 改为 `false` 并补 `publishConfig`，然后：
+
+```cmd
+npm run leak-scan      # 先扫泄漏（不该打包的日志 / 账号 uid / 绝对路径）
+npm pack
+npm login
+npm publish
+```
+
+发布后，dsh **设置 → 插件 → 添加插件**里可直接填包名；未发布时填
+`github:USERNAME/dsh-plugin-workbuddy-pool`。GitHub 直装始终可用，npm 只是
+降低"没有 git 环境的用户"的门槛。
+
+---
+
+## 致谢
+
+本项目的宿主端基础（桥自动管理、模型目录、面板骨架）源自
+[WorkBuddy ↔ dsh 桥接插件](https://github.com/Ianzhyh/workbuddy-to-dsh)（MIT）。
+号池、多账号并发、积分池视图、自动签到与到期预警是本仓库新增的部分。
+
+这一版的多项修正也来自使用者的真实反馈（macOS 客户端探测、Docker / NAS 上的凭据持久化、
+Claude Code 直连的模型名与上下文窗口、限流后自动切号）。
+
+---
+
+## 许可
+
+MIT，与本仓库其余部分一致。与腾讯、WorkBuddy、CodeBuddy、DeepSeek 均无关联。

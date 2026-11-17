@@ -1,0 +1,388 @@
+/**
+ * 环境自检：在一台**新机器**上装好后先跑这个。
+ *
+ *   node dsh-plugin/scripts/preflight.mjs
+ *   node dsh-plugin/scripts/preflight.mjs --json     # 机器可读
+ *
+ * 它只读不写（除了可选地探测端口），逐项告诉你「行不行 / 为什么 / 怎么修」：
+ *   1. Node 版本
+ *   2. 插件要用的脚本在哪（仓库检出 / 自带 vendor）
+ *   3. WorkBuddy 桌面端与登录文件（或插件登录凭据 —— 二选一）
+ *   4. 端口 8790 / 8792 是否可用（占用者是自己的进程还是别的软件）
+ *   5. 桥是否在跑、能列出多少模型、积分多少
+ *   6. 插件装进了哪些 dsh profile
+ */
+import { existsSync, readdirSync, readFileSync, openSync, readSync, closeSync, statSync } from 'node:fs';
+import { homedir } from 'node:os';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+// 直接复用插件自己的解析逻辑，保证"自检结论"和"插件实际行为"一致
+import { detectProjectRoot, readProjectEnv } from '../lib/index.js';
+import { PLUGIN_PACKAGE_NAMES } from '../lib/packageNames.mjs';
+import { CONSOLE_MARKER } from '../lib/console.mjs';
+
+const HERE = dirname(fileURLToPath(import.meta.url));
+const PLUGIN_DIR = dirname(HERE);
+const JSON_OUT = process.argv.includes('--json');
+const DEFAULT_TOKEN = 'wb-local-bridge';
+/** 插件首次运行会生成随机令牌并落盘；探针必须优先用它，旧默认值只作最后兜底。 */
+const FILE_TOKEN = (() => {
+  try { return readFileSync(join(PLUGIN_DIR, '.bridge-token'), 'utf8').trim(); } catch { return ''; }
+})();
+
+const results = [];
+const record = (level, title, detail, fix) => results.push({ level, title, detail, fix });
+
+/** 只读日志尾部：自检经常在日志 1-2MB 时运行，没必要整文件读进内存。 */
+function readLogTail(file, maxBytes = 256 * 1024) {
+  try {
+    const st = statSync(file);
+    const len = Math.min(maxBytes, st.size);
+    if (!len) return '';
+    const fd = openSync(file, 'r');
+    try {
+      const buf = Buffer.alloc(len);
+      readSync(fd, buf, 0, len, st.size - len);
+      return buf.toString('utf8');
+    } finally { closeSync(fd); }
+  } catch { return ''; }
+}
+
+/** 1. Node */
+const nodeMajor = Number(process.versions.node.split('.')[0]);
+record(nodeMajor >= 18 ? 'ok' : 'bad', `Node.js ${process.versions.node}`,
+  nodeMajor >= 18 ? '满足 >= 18' : '版本过低，dsh 插件要求 Node 18 以上',
+  nodeMajor >= 18 ? null : '安装 Node 18+（建议 20/22 LTS）后重开终端');
+
+/** 2. 脚本位置：仓库检出优先，其次插件自带 vendor（与插件同一个函数） */
+const BRIDGE_REL = join('bridge', 'workbuddy-bridge.mjs');
+const CONSOLE_REL = join('dashboard', 'server.mjs');
+const candidatePaths = [
+  { path: dirname(PLUGIN_DIR), label: '仓库检出目录（插件就在仓库里）' },
+  { path: join(PLUGIN_DIR, 'vendor'), label: '插件自带 vendor/（分发副本）' },
+];
+const projectRoot = detectProjectRoot();
+if (!projectRoot) {
+  record('bad', '桥脚本位置', `既没在仓库旁边找到，也没有 vendor/（找过：${candidatePaths.map((c) => c.path).join(' / ')}）`,
+    '在仓库里运行 `npm run vendor` 生成自带副本，或把插件装在仓库的 dsh-plugin/ 子目录下；也可以用插件配置 projectRoot 指定路径');
+} else {
+  const which = candidatePaths.find((c) => c.path === projectRoot);
+  record('ok', '运行目录（projectRoot）', `${which ? which.label : '探测结果'}：${projectRoot}`, null);
+  for (const [rel, name] of [[BRIDGE_REL, '桥'], [CONSOLE_REL, '控制台']]) {
+    const ok = existsSync(join(projectRoot, rel));
+    record(ok ? 'ok' : 'bad', `${name}脚本`, join(projectRoot, rel),
+      ok ? null : '重新跑 `npm run vendor`，或检查仓库是否完整');
+  }
+  const envFile = join(projectRoot, '.env');
+  record(existsSync(envFile) ? 'ok' : 'warn', '.env 配置',
+    existsSync(envFile) ? envFile : '没有 .env（会用内置默认：桥 8790 / 控制台 8792）',
+    existsSync(envFile) ? null : '需要改端口或登录文件时：复制 .env.example 为 .env 再改');
+}
+
+/** 解析 .env：与插件同一套（process.env 优先，其次 projectRoot/.env） */
+const env = projectRoot ? readProjectEnv(projectRoot) : {};
+const pick = (key, fallback) => process.env[key] || env[key] || fallback;
+
+/** 3. WorkBuddy 桌面端 + 登录文件 */
+const homeDir = homedir();
+const authDirs = [
+  process.env.WORKBUDDY_AUTH_DIR,
+  // 与 config.mjs 的 authDir() 同一套平台分支 —— 原实现只有 Windows 形态，
+  // 且在 LOCALAPPDATA 缺失时会拼出相对路径（`\CodeBuddyExtension\…`）。
+  process.platform === 'win32'
+    ? join(process.env.LOCALAPPDATA || join(homeDir, 'AppData', 'Local'), 'CodeBuddyExtension', 'Data', 'Public', 'auth')
+    : process.platform === 'darwin'
+      ? join(homeDir, 'Library', 'Application Support', 'CodeBuddyExtension', 'Data', 'Public', 'auth')
+      : join(homeDir, '.local', 'share', 'CodeBuddyExtension', 'Data', 'Public', 'auth'),
+].filter(Boolean);
+/*
+ * 第二条凭据来源：插件登录。自检要在"没装桌面端"的机器上也能给出正确结论，
+ * 不能把缺失的 .info 一律判红 —— 那正是插件登录要消除的前置条件。
+ */
+const credentialDir = process.env.WORKBUDDY_CREDENTIAL_DIR || env.WORKBUDDY_CREDENTIAL_DIR
+  || join(homeDir, '.workbuddy-bridge', 'credentials');
+let pluginCredentialCount = 0;
+try { pluginCredentialCount = readdirSync(credentialDir).filter((f) => f.endsWith('.cred')).length; } catch { /* 目录不存在 */ }
+let pluginSource = '';
+try { pluginSource = JSON.parse(readFileSync(join(credentialDir, 'source.json'), 'utf8')).source || ''; } catch { /* 没有 source.json */ }
+const pluginLoginDetected = pluginCredentialCount > 0 || pluginSource === 'plugin';
+record(pluginLoginDetected ? 'ok' : 'warn', '插件登录凭据',
+  pluginLoginDetected
+    ? `${credentialDir}（${pluginCredentialCount} 个账号${pluginSource ? `，source=${pluginSource}` : ''}）`
+    : '未检测到（可选：不装桌面端时用插件里的「插件登录」）',
+  pluginLoginDetected ? null : '如果不想安装 WorkBuddy 桌面端：在 dsh 插件的「账号」页点「开始登录」完成一次浏览器授权');
+
+const authDir = authDirs.find((d) => existsSync(d));
+if (!authDir) {
+  record(pluginLoginDetected ? 'ok' : 'bad', 'WorkBuddy 登录文件',
+    pluginLoginDetected ? '未安装桌面端；当前使用插件登录凭据' : `找不到登录目录（找过：${authDirs.join(' / ')}）`,
+    pluginLoginDetected ? null : '安装并登录 WorkBuddy 桌面端；或改用上面的「插件登录」，不需要桌面端');
+} else {
+  const infos = readdirSync(authDir).filter((f) => f.endsWith('.info'));
+  record(infos.length || pluginLoginDetected ? 'ok' : 'bad', 'WorkBuddy 登录文件',
+    `${authDir}（${infos.length} 个：${infos.join('、') || '空'}）${pluginLoginDetected ? ' · 检测到插件登录凭据（是否生效看端口检查）' : ''}`,
+    infos.length || pluginLoginDetected ? null : '在 WorkBuddy 桌面端登录一次账号；或改用「插件登录」');
+  const active = process.env.WORKBUDDY_AUTH_FILE || (existsSync(join(authDir, 'workbuddy-desktop.info')) ? join(authDir, 'workbuddy-desktop.info') : '');
+  if (!active) {
+    record(pluginLoginDetected ? 'ok' : 'warn', '当前使用的登录文件',
+      pluginLoginDetected ? '使用插件登录，不需要桌面端登录文件' : '没找到默认的 workbuddy-desktop.info',
+      pluginLoginDetected ? null : '在 .env 里用 WORKBUDDY_AUTH_FILE 指定具体文件（多账号时用得上）');
+  } else if (!existsSync(active)) {
+    // 用户显式指定的路径可能写错、文件可能被删 —— 这时**不能**直接 readFileSync：
+    // 自检脚本的最大价值就是"装上还没跑通时告诉你为什么"，在这里抛 Node 堆栈
+    // 恰好把最需要它的人挡在门外（实测：未捕获异常 + 退出码 1）。
+    // 所以这里降级成一条可读的检查项，与上面"找不到登录目录"同一种处理方式。
+    record('bad', '当前使用的登录文件', `指定的文件不存在：${active}`,
+      '检查 .env / 环境变量里的 WORKBUDDY_AUTH_FILE 是否写对；'
+      + '文件被删或换了账号时，在 WorkBuddy 桌面端重新登录一次即可重新生成');
+  } else {
+    const raw = readFileSync(active, 'utf8').trim();
+    const encrypted = raw.startsWith('{') || raw.startsWith('v10') || !raw.includes('"');
+    record('ok', '当前使用的登录文件', `${active}（${encrypted ? 'AtRest 信封/加密' : '明文 JSON'}）`, null);
+  }
+}
+
+/** 4. 端口与"那是不是我们自己的进程"
+ *  桥：/health 带 Bearer 才回 200（顺便验证 token 对不对）
+ *  控制台：没有 /health 路由，靠首页标题识别 —— 与插件判定方式一模一样
+ */
+const bridgePort = Number(pick('WORKBUDDY_PORT', 8790));
+const consolePort = Number(pick('DASHBOARD_PORT', 8792));
+const token = pick('WORKBUDDY_LOCAL_TOKEN', FILE_TOKEN || DEFAULT_TOKEN);
+
+const probeBridge = async (port) => {
+  try {
+    const res = await fetch(`http://127.0.0.1:${port}/health`, {
+      headers: { authorization: `Bearer ${token}` },
+      signal: AbortSignal.timeout(2500),
+    });
+    const body = await res.json().catch(() => ({}));
+    if (res.ok && body && (body.ok !== undefined || body.pid !== undefined)) {
+      return {
+        state: 'ours',
+        note: body.pid ? `pid ${body.pid}` : '',
+        authSource: body.auth?.source || '',
+        startedAtMs: Date.parse(body.startedAt) || 0,
+      };
+    }
+    // 桥活着但**登录凭据读不出来**时 /health 回 503（body 里带 authFile 与原因）。
+    // 这与"端口上是别的服务"完全不同，必须分开报 —— 否则用户会去找不存在的端口冲突。
+    if (body && body.ok === false
+      && (body.authFile !== undefined || /login|sign in|credential|凭据|登录/i.test(String(body.error || '')))) {
+      return {
+        state: 'degraded',
+        note: String(body.error || '登录凭据读不出来'),
+        authFile: body.authFile,
+        startedAtMs: Date.parse(body.startedAt) || 0,
+      };
+    }
+    if (res.status === 401) return { state: 'other', note: 'HTTP 401（有服务在，但鉴权不过：可能 token 不对或不是本项目的桥）' };
+    return { state: 'other', note: `HTTP ${res.status}` };
+  } catch {
+    return { state: 'free', note: '' };
+  }
+};
+const probeConsole = async (port) => {
+  try {
+    const res = await fetch(`http://127.0.0.1:${port}/`, { signal: AbortSignal.timeout(2500) });
+    const html = await res.text().catch(() => '');
+    if (html.includes(CONSOLE_MARKER)) return { state: 'ours', note: '首页结构标记匹配' };
+    return { state: 'other', note: `HTTP ${res.status}（响应里没有控制台的结构标记）` };
+  } catch {
+    return { state: 'free', note: '' };
+  }
+};
+const bridgePortState = await probeBridge(bridgePort);
+const consolePortState = await probeConsole(consolePort);
+record(bridgePortState.state === 'other' ? 'warn' : bridgePortState.state === 'degraded' ? 'warn' : 'ok', `端口 ${bridgePort}（桥）`,
+  bridgePortState.state === 'ours' ? `本项目的桥在跑（${bridgePortState.note || '已响应'}${bridgePortState.authSource ? `，凭据 ${bridgePortState.authSource}` : ''}）`
+    : bridgePortState.state === 'degraded' ? `本项目的桥在跑，但读不出登录凭据：${bridgePortState.note}${bridgePortState.authFile ? `（${bridgePortState.authFile}）` : ''}`
+      : bridgePortState.state === 'other' ? `被别的服务占用：${bridgePortState.note}`
+        : '空闲（插件会在加载时拉起桥）',
+  bridgePortState.state === 'degraded' ? '打开 WorkBuddy 桌面端重新登录一次；多账号时在 .env 里用 WORKBUDDY_AUTH_FILE 指定具体文件'
+    : bridgePortState.state === 'other' ? '在 .env 里换一个 WORKBUDDY_PORT' : null);
+record(consolePortState.state === 'other' ? 'warn' : 'ok', `端口 ${consolePort}（控制台）`,
+  consolePortState.state === 'ours' ? `本项目的控制台在跑（${consolePortState.note}）`
+    : consolePortState.state === 'free' ? '空闲（需要时插件会拉起控制台）'
+      : `被别的服务占用：${consolePortState.note}`,
+  consolePortState.state === 'other' ? '在 .env 里换一个 DASHBOARD_PORT' : null);
+
+/** 5. 桥能不能用 */
+if (bridgePortState.state === 'ours' || bridgePortState.state === 'degraded') {
+  try {
+    const headers = { authorization: `Bearer ${token}` };
+    const models = await (await fetch(`http://127.0.0.1:${bridgePort}/v1/models`, { headers, signal: AbortSignal.timeout(5000) })).json();
+    const count = Array.isArray(models) ? models.length : (models.data || []).length;
+    record(count > 0 ? 'ok' : 'warn', '模型目录', `桥报告 ${count} 个模型`, count > 0 ? null : '桥连上了但目录为空：检查 WorkBuddy 登录是否过期');
+    const quota = await (await fetch(`http://127.0.0.1:${bridgePort}/v1/quota`, { headers, signal: AbortSignal.timeout(8000) })).json();
+    const unlimited = quota.unlimited === true || (typeof quota.total === 'number' && quota.total < 0);
+    record('ok', '积分',
+      unlimited
+        ? '余额不限量（企业/教育额度）'
+        : (typeof quota.total === 'number' ? `余额 ${quota.total}（${(quota.packages || []).length} 个套餐）` : '已读取（无 total 字段）'),
+      null);
+  } catch (error) {
+    record('warn', '桥接口', `调用失败：${error.message}`, '看 bridge/bridge.log 的最后几行');
+  }
+} else {
+  record('info', '桥未运行', '这不是错误：插件加载时会自动拉起（已在跑就复用）', '也可以手动 `node bridge/workbuddy-bridge.mjs`');
+}
+
+/**
+ * 5b. 本次桥运行是否被上游 11128 拦截过。
+ *
+ * 优先查 `/v1/requests`：新桥会把“兜底成功”记成一条 ok + fallback 字段，
+ * 把“仍失败”记成 code 11128。这样能区分“已恢复”和“还在断”，不会像只扫日志
+ * 那样把已经救回的 11128 也报成告警。
+ */
+if (bridgePortState.state === 'ours' || bridgePortState.state === 'degraded') {
+  let requests = null;
+  try {
+    const r = await fetch(`http://127.0.0.1:${bridgePort}/v1/requests?limit=100`, {
+      headers: { authorization: `Bearer ${token}` },
+      signal: AbortSignal.timeout(5000),
+    });
+    const body = await r.json().catch(() => null);
+    if (Array.isArray(body?.requests)) requests = body.requests;
+  } catch { /* 旧桥/接口不可用：退回日志扫描 */ }
+
+  if (requests) {
+    // 只看**本次桥运行**的记录：上一次运行（升级/重启前）的 11128 不应继续告警。
+    const since = bridgePortState.startedAtMs || 0;
+    const current = since ? requests.filter((r) => Number(r.t) >= since) : requests;
+    const failed11128 = current.filter((r) => Number(r.code) === 11128 || /11128/.test(String(r.error || '')));
+    const recovered = current.filter((r) => r.ok === true && typeof r.fallback === 'string');
+    if (failed11128.length) {
+      const latest = failed11128[0];
+      record('warn', '上游 11128',
+        `${failed11128.length} 条仍未恢复（最新：${new Date(latest.t).toISOString()}，${latest.error || '来源/模板拦截'}）`,
+        '看 bridge/bridge.log 的 `upstream error` 行；运行 `node tools/dev/probe-audit-template.mjs` 定位是 system 还是 tools/工具结果');
+    } else if (recovered.length) {
+      const strategies = [...new Set(recovered.map((r) => r.fallback))].join(' / ');
+      record('ok', '上游 11128 兜底', `${recovered.length} 次已通过 ${strategies} 恢复（system 可能与上游模板不同）`, null);
+    }
+  } else if (projectRoot) {
+    // 旧桥没有 fallback 字段 / 接口不可用：只能如实说“日志里有，无法判断是否已恢复”。
+    const tail = readLogTail(join(projectRoot, 'bridge', 'bridge.log'));
+    if (tail) {
+      const lines = tail.split(/\r?\n/);
+      let start = 0;
+      for (let i = lines.length - 1; i >= 0; i -= 1) {
+        if (lines[i].includes('workbuddy-bridge listening')) { start = i; break; }
+      }
+      const hits = lines.slice(start).filter((line) => line.includes('11128'));
+      if (hits.length) {
+        record('warn', '上游 11128',
+          `日志中出现 ${hits.length} 次 11128；当前桥不支持从账本区分“已兜底恢复/仍失败”`,
+          '升级/重启桥后再跑一次自检；若仍失败，运行 `node tools/dev/probe-audit-template.mjs`');
+      }
+    }
+  }
+}
+
+/**
+ * 在 profile 的配置里找 web-search-deepseek 分节。
+ * 只做文本扫描（不引入 YAML 依赖），够用来回答“有没有指向当前桥”。
+ */
+function findSearchConfig(profileDir) {
+  const files = ['cordis.patch.yml', 'settings.yaml', 'settings.yml', 'config.yaml', 'config.yml'];
+  for (const file of files) {
+    const path = join(profileDir, file);
+    if (!existsSync(path)) continue;
+    let text = '';
+    try { text = readFileSync(path, 'utf8'); } catch { continue; }
+    const lines = text.split(/\r?\n/);
+    const start = lines.findIndex((line) => /^\s*-\s*id:\s*web-search-deepseek\s*$/.test(line)
+      || /^\s*web-search-deepseek\s*:\s*$/.test(line));
+    if (start < 0) continue;
+    const block = [];
+    for (let i = start; i < lines.length; i += 1) {
+      const line = lines[i];
+      if (i > start) {
+        if (/^\s*-\s*id:\s*/.test(line)) break;
+        if (/^\S/.test(line) && !/^\s/.test(line)) break;
+      }
+      block.push(line);
+    }
+    const body = block.join('\n');
+    const unquote = (value) => String(value || '').replace(/^['"]|['"]$/g, '');
+    return {
+      file: path,
+      baseURL: unquote((body.match(/baseURL:\s*(\S+)/) || [])[1]).replace(/\/+$/, ''),
+      apiKeyEnv: unquote((body.match(/apiKeyEnv:\s*(\S+)/) || [])[1]),
+    };
+  }
+  return null;
+}
+
+/** 6. 装进了哪些 dsh profile */
+const dshHome = process.env.DSH_HOME || join(homedir(), '.dsh');
+const profilesDir = join(dshHome, 'profiles');
+if (!existsSync(profilesDir)) {
+  record('warn', 'dsh profile', `${profilesDir} 不存在`, `确认 DSH_HOME（当前 ${dshHome}）；dsh 桌面版一般是 ~/.dsh`);
+} else {
+  const installed = [];
+  const installedProfiles = [];
+  for (const name of readdirSync(profilesDir)) {
+    const pkgPath = join(profilesDir, name, 'package.json');
+    if (!existsSync(pkgPath)) continue;
+    try {
+      const pkg = JSON.parse(readFileSync(pkgPath, 'utf8'));
+      const dep = PLUGIN_PACKAGE_NAMES.find((p) => pkg.dependencies?.[p]);
+      const inBundles = (pkg.dsh?.profile?.bundles || []).some((b) => PLUGIN_PACKAGE_NAMES.includes(b));
+      if (dep) installed.push(`${name}（${pkg.dependencies[dep]}）`);
+      else if (inBundles) installed.push(`${name}（bundle）`);
+      if (dep || inBundles) installedProfiles.push({ name, dir: join(profilesDir, name) });
+    } catch { /* 忽略坏 JSON */ }
+  }
+  record(installed.length ? 'ok' : 'warn', '插件安装情况',
+    installed.length ? `已装进：${installed.join('，')}` : '没有 profile 依赖 dsh-plugin-workbuddy-pool',
+    installed.length ? null : '在 dsh 里用「设置 → 插件 → 安装」指向本目录，或 `dsh plugin --profile <名字> add <本目录>`');
+
+  /*
+   * 网页搜索的**配置层**检查：不发起搜索、不消耗额度。真实链路（含 dsh
+   * provider 解析）要用面板的「重新检测」，这里只回答“有没有指向当前桥”。
+   */
+  if (installedProfiles.length) {
+    const expected = `http://127.0.0.1:${bridgePort}/v1`;
+    const states = installedProfiles.map(({ name, dir }) => {
+      const found = findSearchConfig(dir);
+      if (!found) return { name, state: 'missing', detail: '未配置（dsh 默认走 DeepSeek）' };
+      if (found.baseURL === expected && found.apiKeyEnv === 'WORKBUDDY_SEARCH_BRIDGE_KEY') {
+        return { name, state: 'ok', detail: `指向本地桥（${found.apiKeyEnv}）` };
+      }
+      return {
+        name,
+        state: 'other',
+        detail: `baseURL=${found.baseURL || '(空)'} · apiKeyEnv=${found.apiKeyEnv || '(空)'}`,
+      };
+    });
+    const okCount = states.filter((s) => s.state === 'ok').length;
+    record(okCount ? 'ok' : 'warn', '网页搜索（配置层）',
+      states.map((s) => `${s.name}：${s.detail}`).join('；'),
+      okCount ? null : '在 dsh 的 WorkBuddy → 概览 → 网页搜索点「一键接入」；真实搜索用「重新检测」');
+  }
+}
+
+/** 输出 */
+const ICON = { ok: '✅', warn: '⚠️ ', bad: '❌', info: 'ℹ️ ' };
+const bad = results.filter((r) => r.level === 'bad');
+const warn = results.filter((r) => r.level === 'warn');
+if (JSON_OUT) {
+  console.log(JSON.stringify({ projectRoot, node: process.versions.node, results, summary: { bad: bad.length, warn: warn.length } }, null, 2));
+} else {
+  console.log('\nWorkBuddy 插件环境自检\n' + '─'.repeat(60));
+  for (const r of results) {
+    console.log(`${ICON[r.level]} ${r.title}`);
+    if (r.detail) console.log(`     ${r.detail}`);
+    if (r.fix) console.log(`     ↳ 修法：${r.fix}`);
+  }
+  console.log('─'.repeat(60));
+  console.log(bad.length
+    ? `❌ ${bad.length} 项必须处理${warn.length ? `，另有 ${warn.length} 项建议` : ''}`
+    : `✅ 关键项全部通过${warn.length ? `（${warn.length} 项建议看一下）` : ''}`);
+  if (projectRoot) console.log(`\n插件会用的目录：${projectRoot}`);
+  console.log('装好后：重启一次 dsh（宿主端改动需要重启才生效），然后在 设置 → WorkBuddy 里看状态。\n');
+}
+process.exit(bad.length ? 1 : 0);

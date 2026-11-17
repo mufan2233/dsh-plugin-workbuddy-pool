@@ -1,0 +1,63 @@
+# ============================================================================
+# 绝不提交的内容
+#
+# 这个仓库只发"功能"，不发"我的账号"。以下任何一项进 git 都等于泄漏：
+#
+#   · .dsh/profiles/web/cordis.patch.yml  —— 里面是实际在用的 provider/model 绑定
+#   · 任何 .cred / .credentials.yaml      —— 账号凭证
+#   · workbuddy-pool.json                 —— 号池配置，含 uid / 端口 / 昵称
+#   · bridge.log / console.log            —— 追加写了上游响应与账号 uid
+#   · *.tgz                               —— 打包产物
+#
+# 提交前跑一遍本仓库的泄漏检查：
+#   node scripts/leak-scan.mjs
+# ============================================================================
+
+# 依赖
+node_modules/
+.pnpm-store/
+
+# 打包产物
+*.tgz
+dist/
+build/
+out/
+
+# 运行期日志（含上游响应体、账号 uid、本机绝对路径）
+*.log
+*.log.*
+*.jsonl
+
+# 运行期状态
+.state.json
+.tmp-*
+*.tmp
+*.bak
+*.bak-*
+*.orig
+*.orig-backup
+
+# 本地配置与凭证
+.env
+.env.local
+.env.*.local
+**/credentials/
+**/*.cred
+**/.credentials.yaml
+**/workbuddy-pool.json
+.run/
+
+# 测试与演练沙盒
+*.test.mjs
+*.spec.mjs
+.drill/
+.test-drill/
+sandbox/
+coverage/
+
+# 编辑器与系统噪音
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+*.swp

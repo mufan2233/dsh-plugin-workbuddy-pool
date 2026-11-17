@@ -1,0 +1,66 @@
+{
+  "name": "dsh-plugin-workbuddy-pool",
+  "version": "2.1.2",
+  "description": "DeepSeek Harness 插件：把本机 WorkBuddy 的模型原生接进 dsh，并支持多账号号池 —— 每个账号独立桥进程、独立积分，可在面板里查看余额、切换账号、自动签到与到期预警。",
+  "type": "module",
+  "license": "MIT",
+  "main": "lib/index.js",
+  "exports": {
+    ".": "./lib/index.js",
+    "./client": "./lib/client.js",
+    "./cordis.patch.yml": "./cordis.patch.yml",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib",
+    "scripts",
+    "vendor",
+    "cordis.patch.yml",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "os": [
+    "win32"
+  ],
+  "keywords": [
+    "deepseek-harness",
+    "dsh-plugin",
+    "dsh-bundle",
+    "workbuddy",
+    "codebuddy",
+    "llm-provider",
+    "multi-account",
+    "account-pool",
+    "credit-pool"
+  ],
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "~4.0.4"
+  },
+  "peerDependenciesMeta": {
+    "@deepseek-ai/cordis": {
+      "optional": true
+    }
+  },
+  "scripts": {
+    "leak-scan": "node scripts/leak-scan.mjs"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web"
+    }
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/USERNAME/dsh-plugin-workbuddy-pool.git"
+  },
+  "homepage": "https://github.com/USERNAME/dsh-plugin-workbuddy-pool#readme",
+  "bugs": {
+    "url": "https://github.com/USERNAME/dsh-plugin-workbuddy-pool/issues"
+  }
+}

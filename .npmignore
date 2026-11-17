@@ -1,0 +1,53 @@
+# ============================================================================
+# npm 打包排除项
+#
+# `files` 白名单已经限制到 lib/scripts/vendor/cordis.patch.yml/README.md，
+# 但白名单是"目录级"的 —— vendor/ 一旦整目录放行，任何落在里面的运行期
+# 文件都会被打进 tarball。这里用黑名单再兜一层。
+#
+# 为什么重要：bridge.log 会追加写上游响应体与账号 uid，console.log 带本机
+# 绝对路径。它们曾经被打进 1.22.x 的 tarball（1.5MB，含 7 个 uid）。发布
+# 到 npm/GitHub 之前必须挡住，否则等于把使用记录发给所有人。
+# ============================================================================
+
+# 运行期日志（桥 stdout / 控制台 stdout）
+*.log
+*.log.*
+*.jsonl
+
+# 运行期状态与本地配置
+.state.json
+.env
+.env.local
+.env.*.local
+
+# 本地凭证 / 账号池
+**/credentials/
+**/*.cred
+**/workbuddy-pool.json
+**/.credentials.yaml
+
+# 备份与临时产物
+*.bak
+*.bak-*
+*.orig
+*.orig-backup
+*.tmp
+.tmp-*
+*.tgz
+
+# 测试与演练
+*.test.mjs
+*.spec.mjs
+.test-drill/
+.drill/
+sandbox/
+
+# 维护者内部文档：不进 npm 包（GitHub 仓库里保留）
+PUBLISHING.md
+
+# 编辑器与系统噪音
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
