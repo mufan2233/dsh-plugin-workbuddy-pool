@@ -1,0 +1,7 @@
+# Normalize line endings: the published sources are LF, and a CRLF checkout
+# would show up as a whole-file diff on every clone.
+* text=auto eol=lf
+
+# Windows-only launch scripts keep CRLF.
+*.cmd text eol=crlf
+*.bat text eol=crlf

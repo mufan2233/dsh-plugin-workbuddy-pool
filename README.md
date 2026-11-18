@@ -124,10 +124,10 @@ dsh 设置页与控制台网页是**两个前端、一个后端**，所以天然
 
 ```sh
 # 方式零：在 dsh 设置 → 插件 → 添加插件，填 GitHub 地址（推荐给最终用户）
-github:USERNAME/dsh-plugin-workbuddy-pool
+github:mufan2233/dsh-plugin-workbuddy-pool
 
 # 方式一：用 dsh 自带的插件管理（等价命令行）
-dsh plugin --profile web add github:USERNAME/dsh-plugin-workbuddy-pool
+dsh plugin --profile web add github:mufan2233/dsh-plugin-workbuddy-pool
 
 # 方式二：本机开发 —— 设置 → 插件 → 添加插件，填本仓库 dsh-plugin 目录的绝对路径
 ```
@@ -159,7 +159,7 @@ dsh plugin --profile web add github:USERNAME/dsh-plugin-workbuddy-pool
 故障排查，见本文件末尾的「故障排查」与「安装」两章；
 
 装不上、配置怎么填、客户端怎么接，优先到
-[Discussions · Q&A](https://github.com/USERNAME/dsh-plugin-workbuddy-pool/discussions/new?category=q-a)
+[Discussions · Q&A](https://github.com/mufan2233/dsh-plugin-workbuddy-pool/discussions/new?category=q-a)
 提问（附脱敏诊断包）；确定是可复现的缺陷再开 issue。公开区都不要贴令牌、登录文件、
 账号 UID 或完整对话。
 
@@ -683,7 +683,7 @@ npm publish
 ```
 
 发布后，dsh **设置 → 插件 → 添加插件**里可直接填包名；未发布时填
-`github:USERNAME/dsh-plugin-workbuddy-pool`。GitHub 直装始终可用，npm 只是
+`github:mufan2233/dsh-plugin-workbuddy-pool`。GitHub 直装始终可用，npm 只是
 降低"没有 git 环境的用户"的门槛。
 
 ---

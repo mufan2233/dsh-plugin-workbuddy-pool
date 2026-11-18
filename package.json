@@ -1,6 +1,6 @@
 {
   "name": "dsh-plugin-workbuddy-pool",
-  "version": "2.1.2",
+  "version": "2.2.0",
   "description": "DeepSeek Harness 插件：把本机 WorkBuddy 的模型原生接进 dsh，并支持多账号号池 —— 每个账号独立桥进程、独立积分，可在面板里查看余额、切换账号、自动签到与到期预警。",
   "type": "module",
   "license": "MIT",
@@ -57,10 +57,10 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/USERNAME/dsh-plugin-workbuddy-pool.git"
+    "url": "git+https://github.com/mufan2233/dsh-plugin-workbuddy-pool.git"
   },
-  "homepage": "https://github.com/USERNAME/dsh-plugin-workbuddy-pool#readme",
+  "homepage": "https://github.com/mufan2233/dsh-plugin-workbuddy-pool#readme",
   "bugs": {
-    "url": "https://github.com/USERNAME/dsh-plugin-workbuddy-pool/issues"
+    "url": "https://github.com/mufan2233/dsh-plugin-workbuddy-pool/issues"
   }
 }
