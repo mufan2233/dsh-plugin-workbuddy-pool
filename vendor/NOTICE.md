@@ -2,31 +2,48 @@
 
 本项目的部分内容派生自或参考了以下公开项目。所有来源均为 MIT 许可。
 
-## 主要上游：workbuddy2api-panel
+## 代码血缘
 
-**来源**：<https://github.com/linguo2625469/workbuddy2api-panel> （MIT）
+```
+lg22-long/workbuddy-bridge          桥的最初实现，零依赖 Node 18+，
+                                    把桌面端会话暴露成 OpenAI 兼容端点
+        ↓
+Ianzhyh/workbuddy-to-dsh            加上 dsh 插件层（provider 注册、设置页、
+                                    控制台、设备码登录、视频/图片生成）
+        ↓
+dsh-plugin-workbuddy-pool           本项目：加号池、多账号并发、到期优先切号
+```
 
-本项目以该项目为基础做了二次优化与功能增强。它把腾讯 CodeBuddy / WorkBuddy
-账号变成 OpenAI 兼容 API 的多账号网关，带 Web 管理面板、账号池轮转、OAuth
-浏览器登录、熔断与冷却、会话粘性、定时签到与成长任务自动化。
+判断依据：本项目 `vendor/` 的目录布局与 `Ianzhyh/workbuddy-to-dsh` 的
+`package.json` `files` 字段逐项对应，其中 11 个文件逐字节相同（`config.mjs`、
+`lib/client-connect.mjs`、`lib/config-schema.mjs`、`lib/find-workbuddy.mjs`、
+`miora-video.mjs`、`miora-image.mjs`、`miora-media-core.mjs`、`wait-drain.mjs`、
+`launch.mjs`、`start-bridge.cmd`、`start-bridge.sh`）。
 
-本项目在它基础上推进的方向：
+## 主要上游：workbuddy-to-dsh
+
+**来源**：<https://github.com/Ianzhyh/workbuddy-to-dsh> （MIT）
+
+本项目的宿主端基础全部出自该项目：桥的自动管理与进程监管（`BridgeSupervisor`）、
+模型目录抓取与筛选、设置页 9 个标签与网页控制台的骨架、设备码登录流程、
+诊断与凭据加密、视频/图片生成通道。本项目的 `vendor/` 就是该项目的产物。
+
+本项目在其上新增的部分：
 
 | 方向 | 说明 |
 |---|---|
-| 承载形态 | 从独立的 Go 网关改成 DeepSeek Harness 的原生插件（`ctx.llm.registerAdapter()`），模型直接进 dsh 选择器，不需要额外跑服务再填 Base URL |
-| 协议侧 | 增加 dsh ↔ OpenAI 的协议翻译层（内容块、`FinishReason`、`Usage`），桥侧仍是 OpenAI 协议 |
-| 多账号模型 | 改为「主账号 + 号池槽位」：一个 `workbuddy` provider group，由 `ensureReady` 动态决定后端，槽位不各自注册 provider，dsh 选择器里不会长出重复分组 |
-| 切号策略 | 增加到期优先（`expiry`）排序：按 30 天内会过期的积分（`atRisk`）而不是总余额打分，避免长期包压住快清零的号 |
-| 面板 | 重做成 dsh 设置页 9 个标签 + 独立网页控制台，两边同源 |
-| 凭据 | 增加桌面端 / 插件登录 / api-key 三来源与运行时切换；凭据加密落盘 |
-
-原项目已于 2026-10-21 停止维护。它的 README 里记录的上游收紧、非法转卖泛滥这些
-情况，同样适用于本项目，见本文末尾「使用边界」。
+| 多账号模型 | 「主账号 + 号池槽位」：一个 `workbuddy` provider group，由 `ensureReady` 动态决定后端，槽位不各自注册 provider，dsh 选择器里不会长出重复分组 |
+| 号池管理 | 每账号独立端口/进程/凭据目录，面板内增删账号、运行时切号，不用重启 |
+| 切号策略 | 到期优先（`expiry`）排序：按 30 天内会过期的积分（`atRisk`）而不是总余额打分 |
+| 自动切号 | 余额低于阈值自动换号，带空闲检测（无请求在跑且静默 90 秒） |
+| 积分池视图 | 多账号余额与到期情况的合并展示 |
 
 ## bridge/workbuddy-bridge.mjs
 
 **来源**：<https://github.com/lg22-long/workbuddy-bridge> （MIT，Copyright (c) 2026 lg22-long）
+
+该文件同时存在于上游 `Ianzhyh/workbuddy-to-dsh` 与本项目中（两边的版本有差异，
+本项目为 648 KB，上游为 722 KB）。最初的实现出自 `lg22-long/workbuddy-bridge`。
 
 本项目对其做了以下改造：
 
@@ -94,3 +111,13 @@
 ## 与被引用项目的关系
 
 本项目与腾讯、WorkBuddy、CodeBuddy、DeepSeek 均无关联，也未获其背书或支持。
+
+## 思路参考（不含代码）
+
+以下项目**没有代码进入本仓库**，只在设计思路上被参考过，一并说明以免误解：
+
+- <https://github.com/linguo2625469/workbuddy2api-panel> （MIT，Go）— 多账号网关的
+  整体形态（账号池如何组织、面板要放什么、签到如何自动化）看过它的公开实现。
+  它是 Go 写的独立服务，与本项目的 JavaScript 代码没有继承关系。
+  该项目已于 2026-10-21 停止维护。
+

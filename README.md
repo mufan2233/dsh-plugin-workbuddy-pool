@@ -690,23 +690,26 @@ npm publish
 
 ## 致谢
 
-本项目以 [workbuddy2api-panel](https://github.com/linguo2625469/workbuddy2api-panel)（MIT）
-为基础做了二次优化与功能增强。它把腾讯 CodeBuddy / WorkBuddy 账号变成 OpenAI 兼容 API
-的多账号网关，账号池轮转、OAuth 登录、熔断冷却、定时签到那套设计是它的。本项目把它改成
-dsh 原生插件，加了协议翻译层、按 `ensureReady` 动态切换的主账号 + 号池槽位结构、到期优先
-切号，以及这边的双语面板。谢谢原作者。
+本项目的宿主端基础全部来自 [workbuddy-to-dsh](https://github.com/Ianzhyh/workbuddy-to-dsh)（MIT）。
+`vendor/` 目录就是该项目的产物：桥的自动管理与进程监管、模型目录抓取与筛选、设置页
+九个标签与网页控制台的骨架、设备码登录流程、诊断与凭据加密、视频与图片生成通道，
+都出自该项目。其中 11 个文件与本项目逐字节相同。谢谢原作者。
 
-本项目的宿主端基础（桥自动管理、模型目录、面板骨架）源自
-[WorkBuddy ↔ dsh 桥接插件](https://github.com/Ianzhyh/workbuddy-to-dsh)（MIT）。
-号池、多账号并发、积分池视图、自动签到与到期预警是本仓库新增的部分。
+号池、多账号并发、到期优先切号、自动切号、积分池视图是本仓库在其上新增的部分。
 
-桥本体派生自 [lg22-long/workbuddy-bridge](https://github.com/lg22-long/workbuddy-bridge)（MIT）。
-凭据信封解密的算法参考了 [XDTrees/dsh-workbuddy-xdpool](https://github.com/XDTrees/dsh-workbuddy-xdpool)（MIT），
-插件登录的流程形状参考了 [molly-ovo/dsh-workbuddy-oauth](https://github.com/molly-ovo/dsh-workbuddy-oauth)（MIT）。
+桥最初由 [lg22-long/workbuddy-bridge](https://github.com/lg22-long/workbuddy-bridge)（MIT）实现，
+经 `workbuddy-to-dsh` 传递到本项目。
+
+另有几处只参考了思路、没有代码进入本仓库：
+
+- [workbuddy2api-panel](https://github.com/linguo2625469/workbuddy2api-panel)（MIT，Go）—
+  多账号网关的整体形态参考过，但它是 Go 写的独立服务，与本案的 JavaScript 代码没有继承关系
+- [XDTrees/dsh-workbuddy-xdpool](https://github.com/XDTrees/dsh-workbuddy-xdpool)（MIT）—
+  凭据信封解密算法的参考
+- [molly-ovo/dsh-workbuddy-oauth](https://github.com/molly-ovo/dsh-workbuddy-oauth)（MIT）—
+  设备码登录流程形状的参考
+
 逐项来源与改写在 [`vendor/NOTICE.md`](vendor/NOTICE.md)。
-
-这一版的多项修正也来自使用者的真实反馈（macOS 客户端探测、Docker / NAS 上的凭据持久化、
-Claude Code 直连的模型名与上下文窗口、限流后自动切号）。
 
 ---
 
